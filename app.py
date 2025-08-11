@@ -494,7 +494,7 @@ with PdfPages(pdf_bytes) as pdf:
     plt.axis("off")
     periodo_txt = f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}"
     resumo = (
-        f"Período: {perido_txt}\n"
+        f"Período: {periodo_txt}\n"
         f"Leads: {len(df)} | Reuniões: {int(count_set(df['_fase_norm'], labels_reuniao_all))} | "
         f"Vendas: {int(count_set(df['_fase_norm'], labels_venda))}"
     )
@@ -553,5 +553,3 @@ st.download_button(
     file_name=f"Relatorio_CRM_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
     mime="application/pdf",
 )
-
-
