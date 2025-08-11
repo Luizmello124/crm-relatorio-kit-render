@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# Cria config do Streamlit em runtime
+# Cria config do Streamlit
 mkdir -p ~/.streamlit
 cat > ~/.streamlit/config.toml << 'EOF'
 [server]
@@ -18,5 +18,5 @@ gatherUsageStats = false
 base = "light"
 EOF
 
-# Sobe o app
-streamlit run app.py
+# Inicia o Streamlit na porta correta
+streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
