@@ -1,22 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
-# Cria config do Streamlit (sem a linha de 'port')
-mkdir -p ~/.streamlit
-cat > ~/.streamlit/config.toml <<EOF
-[server]
-headless = true
-address = "0.0.0.0"
-enableCORS = false
-enableXsrfProtection = false
-
-[browser]
-gatherUsageStats = false
-
-[theme]
-base = "light"
-EOF
-
-# Inicia na porta que o Render fornece
-exec streamlit run app.py --server.port "$PORT" --server.address 0.0.0.0
-
+# roda o streamlit sem usar config.toml
+exec streamlit run app.py \
+  --server.headless true \
+  --server.address 0.0.0.0 \
+  --server.port "$PORT" \
+  --server.enableCORS false \
+  --server.enableXsrfProtection false \
+  --browser.gatherUsageStats false
