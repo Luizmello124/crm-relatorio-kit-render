@@ -1,5 +1,5 @@
-# app.py — Relatório CRM (robusto) — v6
-# Ajustes: Base CLT/SEC + cores & tooltip nos gráficos + funil por vendedora com mesmo layout
+# app.py — Relatório CRM (robusto) — v7
+# Ajustes: ordem fixa das fases + cores; funil por vendedora com eixo em quantidade
 
 import streamlit as st
 import pandas as pd
@@ -13,8 +13,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="Relatório CRM — v6", layout="wide")
-st.title("Gerador de Relatório CRM — v6 (Gráficos + Filtros + PDF)")
+st.set_page_config(page_title="Relatório CRM — v7", layout="wide")
+st.title("Gerador de Relatório CRM — v7 (Gráficos + Filtros + PDF)")
 st.caption("Envie o CSV do CRM (separador ';' ou ','). O app detecta o separador e o encoding automaticamente.")
 
 # =========================================================
@@ -129,8 +129,7 @@ df["Criado"] = pd.to_datetime(df["Criado"], errors="coerce", dayfirst=True)
 df["_fase_norm"] = df["Fase"].apply(norm_phase)
 
 # =========================================================
-# Mapeamento "Fonte" -> "Canal de Origem"
-# (inclui Base CLT/SEC)
+# Mapeamento "Fonte" -> "Canal de Origem" (inclui Base CLT/SEC)
 # =========================================================
 map_dict = {
     "site": "Google Ads",
@@ -149,7 +148,6 @@ map_dict = {
     "whatsapp": "Inbound",
     "indicacao": "Indicação",
     "indicação": "Indicação",
-    # NOVO canal (fonte com essa tag):
     "base clt/sec": "Base CLT/SEC",
     "base clt sec": "Base CLT/SEC",
 }
@@ -163,7 +161,7 @@ canal_ordem = [
     "Prospecção Ativa",
     "Inbound",
     "Indicação",
-    "Base CLT/SEC",   # Novo na ordem
+    "Base CLT/SEC",
     "Outros",
 ]
 
@@ -316,7 +314,7 @@ prospec_rows.append(
 )
 prospec_resumo_df = pd.DataFrame(prospec_rows)
 
-# 4) Prospecção Ativa — Funil Detalhado por Vendedora
+# 4) Prospecção Ativa — Funil Detalhado por Vendedora (tabela)
 prospec_funil_rows = []
 for resp in todas_vendedoras:
     g = prospec[prospec["Responsável"] == resp]
@@ -390,33 +388,33 @@ chart_leads = alt.Chart(base).mark_bar().encode(
 )
 st.altair_chart(chart_leads.properties(height=300), use_container_width=True)
 
-# Paleta de cores por fase (domínio + range)
+# Paleta e ORDEM fixa das fases (conforme solicitado)
 phase_order = [
-    "Abaixo de R$500K",
-    "Fora do Perfil",
-    "Outros/Perdido",
-    "Sem Interesse",
-    "Sem retorno",
+    "Em Atendimento",
     "Agendando Reunião",
     "Reuniões Agendadas",
     "Proposta e Negociação",
     "Negócio Fechado",
-    "Em Atendimento",
+    "Abaixo de R$500K",
+    "Fora do Perfil",
+    "Sem Interesse",
+    "Sem retorno",
+    "Outros/Perdido",
 ]
 phase_colors = [
-    "#fca5a5",  # Abaixo de R$500K - vermelho claro
-    "#f87171",  # Fora do Perfil
-    "#ef4444",  # Outros/Perdido
-    "#dc2626",  # Sem Interesse
-    "#991b1b",  # Sem retorno - vermelho escuro
-    "#86efac",  # Agendando Reunião - verdes
+    "#fbbf24",  # Em Atendimento - amarelo
+    "#86efac",  # Agendando Reunião - verde claro
     "#4ade80",  # Reuniões Agendadas
     "#22c55e",  # Proposta e Negociação
     "#16a34a",  # Negócio Fechado
-    "#fbbf24",  # Em Atendimento - amarelo
+    "#fca5a5",  # Abaixo de R$500K - vermelho claro
+    "#f87171",  # Fora do Perfil
+    "#dc2626",  # Sem Interesse
+    "#991b1b",  # Sem retorno - vermelho escuro
+    "#ef4444",  # Outros/Perdido
 ]
 
-# --- Gráfico 2: Fases x Canal (empilhado normalizado; tooltip em Quantidade)
+# --- Gráfico 2: Fases x Canal (empilhado normalizado; tooltip mostra Quantidade)
 fases_cols = [
     "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
     "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
@@ -443,6 +441,7 @@ chart_stack = (
             alt.Tooltip("Fase:N"),
             alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
         ],
+        order=alt.Order('Fase', sort='ascending')  # respeita a ordem do domain
     )
 )
 st.altair_chart(chart_stack.properties(height=350), use_container_width=True)
@@ -476,21 +475,33 @@ chart_v = alt.Chart(base_v).transform_fold(
 )
 st.altair_chart(chart_v.properties(height=300), use_container_width=True)
 
-# --- Gráfico 5: Funil Detalhado por Vendedora — mesmo layout do gráfico 2
-st.markdown("### 📊 Funil Detalhado por Vendedora — Gráfico (Empilhado)")
+# --- Gráfico 5: Funil detalhado por Vendedora (eixo horizontal em quantidade)
+st.markdown("### 📊 Funil detalhado por Vendedora")
 if not prospec_funil_df.empty:
     pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].copy()
     fases_plot = [
-        "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
-        "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
+        "Em Atendimento",
+        "Agendando Reunião",
+        "Reuniões Agendadas",
+        "Proposta e Negociação",
+        "Negócio Fechado",
+        "Abaixo de R$500K",
+        "Fora do Perfil",
+        "Sem Interesse",
+        "Sem retorno",
+        "Outros/Perdido",
     ]
+    # precisamos reordenar as colunas na mesma ordem antes de derreter
+    for col in fases_plot:
+        if col not in pf_plot.columns:
+            pf_plot[col] = 0
     melted_v = pf_plot.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
 
     chart_pf = (
         alt.Chart(melted_v)
         .mark_bar()
         .encode(
-            x=alt.X("sum(Qtd):Q", stack="normalize", title="Proporção"),
+            x=alt.X("sum(Qtd):Q", stack="zero", title="Quantidade"),
             y=alt.Y("Vendedora:N", sort="-x"),
             color=alt.Color(
                 "Fase:N",
@@ -502,6 +513,7 @@ if not prospec_funil_df.empty:
                 alt.Tooltip("Fase:N"),
                 alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
             ],
+            order=alt.Order('Fase', sort='ascending')
         )
         .properties(height=320)
     )
@@ -546,7 +558,7 @@ st.download_button(
 )
 
 # =========================================================
-# Exportar PDF (matplotlib)
+# Exportar PDF (matplotlib) — mantido como antes
 # =========================================================
 pdf_bytes = BytesIO()
 with PdfPages(pdf_bytes) as pdf:
@@ -596,12 +608,12 @@ with PdfPages(pdf_bytes) as pdf:
     # 4) Funil detalhado por vendedora (agrupado, matplotlib)
     if not prospec_funil_df.empty:
         fig = plt.figure(figsize=(11, 6))
-        fases_plot = [
+        fases_plot_pdf = [
             "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
             "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
         ]
-        pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].set_index("Vendedora")[fases_plot]
-        pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())  # mantive agrupado no PDF
+        pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].set_index("Vendedora")[fases_plot_pdf]
+        pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())
         plt.xticks(rotation=45, ha="right")
         plt.title("Funil Detalhado por Vendedora (Prospecção Ativa)")
         plt.tight_layout()
