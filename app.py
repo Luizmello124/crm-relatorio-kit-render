@@ -1,4 +1,5 @@
-# app.py — Relatório CRM (robusto) — v5
+# app.py — Relatório CRM (robusto) — v6
+# Ajustes: Base CLT/SEC + cores & tooltip nos gráficos + funil por vendedora com mesmo layout
 
 import streamlit as st
 import pandas as pd
@@ -12,8 +13,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="Relatório CRM — v5", layout="wide")
-st.title("Gerador de Relatório CRM — v5 (Gráficos + Filtros + PDF)")
+st.set_page_config(page_title="Relatório CRM — v6", layout="wide")
+st.title("Gerador de Relatório CRM — v6 (Gráficos + Filtros + PDF)")
 st.caption("Envie o CSV do CRM (separador ';' ou ','). O app detecta o separador e o encoding automaticamente.")
 
 # =========================================================
@@ -77,14 +78,13 @@ def read_crm_csv(uploaded_file) -> pd.DataFrame:
         engine="python",
         encoding=enc_used,
         on_bad_lines="skip",
-        dtype_backend="numpy_nullable",  # mais tolerante
+        dtype_backend="numpy_nullable",
     )
 
 # =========================================================
 # Upload
 # =========================================================
 up = st.file_uploader("CSV do CRM", type=["csv"])
-
 if up is None:
     st.info("⬆️ Envie um CSV para começar.")
     st.stop()
@@ -130,6 +130,7 @@ df["_fase_norm"] = df["Fase"].apply(norm_phase)
 
 # =========================================================
 # Mapeamento "Fonte" -> "Canal de Origem"
+# (inclui Base CLT/SEC)
 # =========================================================
 map_dict = {
     "site": "Google Ads",
@@ -148,8 +149,12 @@ map_dict = {
     "whatsapp": "Inbound",
     "indicacao": "Indicação",
     "indicação": "Indicação",
+    # NOVO canal (fonte com essa tag):
+    "base clt/sec": "Base CLT/SEC",
+    "base clt sec": "Base CLT/SEC",
 }
 df["Canal de Origem"] = df["Fonte"].apply(lambda x: map_dict.get(norm_text(x), "Outros"))
+
 canal_ordem = [
     "Google Ads",
     "Trafego Pago - Face",
@@ -158,6 +163,7 @@ canal_ordem = [
     "Prospecção Ativa",
     "Inbound",
     "Indicação",
+    "Base CLT/SEC",   # Novo na ordem
     "Outros",
 ]
 
@@ -376,6 +382,7 @@ with col2:
 with col3:
     st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
 
+# --- Gráfico 1: Leads por Canal
 st.markdown("### 📈 Canais")
 base = funil_df[funil_df["Canal de Origem"] != "TOTAL"][["Canal de Origem", "Leads Recebidos"]]
 chart_leads = alt.Chart(base).mark_bar().encode(
@@ -383,6 +390,33 @@ chart_leads = alt.Chart(base).mark_bar().encode(
 )
 st.altair_chart(chart_leads.properties(height=300), use_container_width=True)
 
+# Paleta de cores por fase (domínio + range)
+phase_order = [
+    "Abaixo de R$500K",
+    "Fora do Perfil",
+    "Outros/Perdido",
+    "Sem Interesse",
+    "Sem retorno",
+    "Agendando Reunião",
+    "Reuniões Agendadas",
+    "Proposta e Negociação",
+    "Negócio Fechado",
+    "Em Atendimento",
+]
+phase_colors = [
+    "#fca5a5",  # Abaixo de R$500K - vermelho claro
+    "#f87171",  # Fora do Perfil
+    "#ef4444",  # Outros/Perdido
+    "#dc2626",  # Sem Interesse
+    "#991b1b",  # Sem retorno - vermelho escuro
+    "#86efac",  # Agendando Reunião - verdes
+    "#4ade80",  # Reuniões Agendadas
+    "#22c55e",  # Proposta e Negociação
+    "#16a34a",  # Negócio Fechado
+    "#fbbf24",  # Em Atendimento - amarelo
+]
+
+# --- Gráfico 2: Fases x Canal (empilhado normalizado; tooltip em Quantidade)
 fases_cols = [
     "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
     "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
@@ -393,13 +427,27 @@ melt = funil_df[funil_df["Canal de Origem"] != "TOTAL"].melt(
     var_name="Fase",
     value_name="Qtd",
 )
-chart_stack = alt.Chart(melt).mark_bar().encode(
-    x=alt.X("Qtd:Q", stack="normalize", title="Proporção"),
-    y="Canal de Origem:N",
-    color=alt.Color("Fase:N"),
+chart_stack = (
+    alt.Chart(melt)
+    .mark_bar()
+    .encode(
+        x=alt.X("sum(Qtd):Q", stack="normalize", title="Proporção"),
+        y=alt.Y("Canal de Origem:N", sort="-x"),
+        color=alt.Color(
+            "Fase:N",
+            scale=alt.Scale(domain=phase_order, range=phase_colors),
+            legend=alt.Legend(title="Fase")
+        ),
+        tooltip=[
+            alt.Tooltip("Canal de Origem:N"),
+            alt.Tooltip("Fase:N"),
+            alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
+        ],
+    )
 )
 st.altair_chart(chart_stack.properties(height=350), use_container_width=True)
 
+# --- Gráfico 3: Conversões por Canal
 conv_melt = conv_df[conv_df["Canal de Origem"] != "TOTAL"].melt(
     id_vars=["Canal de Origem"], var_name="Métrica", value_name="Valor"
 )
@@ -407,9 +455,15 @@ chart_conv = alt.Chart(conv_melt).mark_bar().encode(
     x=alt.X("Valor:Q", title="%"),
     y=alt.Y("Canal de Origem:N", sort="-x"),
     color="Métrica:N",
+    tooltip=[
+        alt.Tooltip("Canal de Origem:N"),
+        alt.Tooltip("Métrica:N"),
+        alt.Tooltip("Valor:Q", title="%"),
+    ],
 )
 st.altair_chart(chart_conv.properties(height=280), use_container_width=True)
 
+# --- Gráfico 4: Vendedoras (Prospecção Ativa) — barras agrupadas
 st.markdown("### 👤 Vendedoras (Prospecção Ativa)")
 base_v = prospec_resumo_df[prospec_resumo_df["Vendedora"] != "TOTAL"][["Vendedora", "Leads Gerados", "Reuniões Agendadas", "Vendas"]]
 chart_v = alt.Chart(base_v).transform_fold(
@@ -418,33 +472,40 @@ chart_v = alt.Chart(base_v).transform_fold(
     x="Valor:Q",
     y=alt.Y("Vendedora:N", sort="-x"),
     color="Métrica:N",
+    tooltip=[alt.Tooltip("Vendedora:N"), alt.Tooltip("Métrica:N"), alt.Tooltip("Valor:Q", title="Quantidade")],
 )
 st.altair_chart(chart_v.properties(height=300), use_container_width=True)
 
-conv_v = prospec_resumo_df[prospec_resumo_df["Vendedora"] != "TOTAL"][
-    ["Vendedora", "Conversão Reunião (%)", "Conversão Venda (%)"]
-].melt(id_vars=["Vendedora"], var_name="Métrica", value_name="Valor")
-chart_conv_v = alt.Chart(conv_v).mark_bar().encode(
-    x=alt.X("Valor:Q", title="%"),
-    y=alt.Y("Vendedora:N", sort="-x"),
-    color="Métrica:N",
-)
-st.altair_chart(chart_conv_v.properties(height=250), use_container_width=True)
-
-st.markdown("### 📊 Funil Detalhado por Vendedora — Gráfico (Agrupado)")
+# --- Gráfico 5: Funil Detalhado por Vendedora — mesmo layout do gráfico 2
+st.markdown("### 📊 Funil Detalhado por Vendedora — Gráfico (Empilhado)")
 if not prospec_funil_df.empty:
     pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].copy()
     fases_plot = [
         "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
         "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
     ]
-    melted = pf_plot.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
-    chart_pf = alt.Chart(melted).mark_bar().encode(
-        x="Vendedora:N",
-        y="Qtd:Q",
-        color="Fase:N",
+    melted_v = pf_plot.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
+
+    chart_pf = (
+        alt.Chart(melted_v)
+        .mark_bar()
+        .encode(
+            x=alt.X("sum(Qtd):Q", stack="normalize", title="Proporção"),
+            y=alt.Y("Vendedora:N", sort="-x"),
+            color=alt.Color(
+                "Fase:N",
+                scale=alt.Scale(domain=phase_order, range=phase_colors),
+                legend=alt.Legend(title="Fase")
+            ),
+            tooltip=[
+                alt.Tooltip("Vendedora:N"),
+                alt.Tooltip("Fase:N"),
+                alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
+            ],
+        )
+        .properties(height=320)
     )
-    st.altair_chart(chart_pf.properties(height=320), use_container_width=True)
+    st.altair_chart(chart_pf, use_container_width=True)
 
 # =========================================================
 # Tabelas
@@ -532,7 +593,7 @@ with PdfPages(pdf_bytes) as pdf:
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
-    # 4) Funil detalhado por vendedora (agrupado)
+    # 4) Funil detalhado por vendedora (agrupado, matplotlib)
     if not prospec_funil_df.empty:
         fig = plt.figure(figsize=(11, 6))
         fases_plot = [
@@ -540,7 +601,7 @@ with PdfPages(pdf_bytes) as pdf:
             "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
         ]
         pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].set_index("Vendedora")[fases_plot]
-        pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())
+        pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())  # mantive agrupado no PDF
         plt.xticks(rotation=45, ha="right")
         plt.title("Funil Detalhado por Vendedora (Prospecção Ativa)")
         plt.tight_layout()
