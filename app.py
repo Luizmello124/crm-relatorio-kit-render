@@ -335,14 +335,48 @@ for _focus_var in ["focus_prospec", "focar_prospec"]:
         dfv = dfv[dfv["Canal de Origem"] == "Prospecção Ativa"]
         break
 
-# Nome da coluna de fase
-fase_col = "_fase_norm" if "_fase_norm" in dfv.columns else "Fase"
+# Nome da coluna de fase já estava definido acima:
+# fase_col = "_fase_norm" if "_fase_norm" in dfv.columns else "Fase"
+
+# --- opções de rótulos que já vimos nas suas planilhas ---
+REUNIOES_OPTS = {
+    "Agendando Reunião",
+    "Agendamento de reunião",
+    "Reuniões Agendadas",
+    "Reunião agendada",
+}
+PROPOSTA_OPTS = {
+    "Proposta e Negociação",
+    "Proposta e negociação",
+    "Proposta e Negociação -",   # variação que você citou
+}
+VENDAS_OPTS = {
+    "Negócio Fechado",
+    "Negocio Fechado",
+    "Negócios Fechados",
+    "Negócios Fechado",
+    "Negócio fechado",
+}
+
+# Combina as duas colunas possíveis de fase (quando existirem) e faz o OR
+phase_series_list = []
+for col in [fase_col, "Fase"]:
+    if col in dfv.columns:
+        phase_series_list.append(dfv[col].astype(str).str.strip())
+
+def match_any(options: set) -> pd.Series:
+    if not phase_series_list:
+        return pd.Series(False, index=dfv.index)
+    mask = pd.Series(False, index=dfv.index)
+    for s in phase_series_list:
+        mask = mask | s.isin(options)
+    return mask
 
 # KPIs
 total_leads = int(len(dfv))
-total_reunioes = int(dfv[fase_col].isin({"Agendando Reunião", "Reuniões Agendadas"}).sum())
-total_em_proposta = int((dfv[fase_col] == "Proposta e Negociação").sum())
-total_vendas = int((dfv[fase_col] == "Negócio Fechado").sum())
+total_reunioes = int(match_any(REUNIOES_OPTS).sum())
+total_em_proposta = int(match_any(PROPOSTA_OPTS).sum())
+total_vendas = int(match_any(VENDAS_OPTS).sum())
 
 # Cards (mesmo layout)
 c1, c2, c3, c4 = st.columns(4)
