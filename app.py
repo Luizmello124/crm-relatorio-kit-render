@@ -538,6 +538,138 @@ if not prospec_funil_df.empty:
         .properties(height=320)
     )
     st.altair_chart(chart_pf, use_container_width=True)
+    
+# --- Gráfico 6: Leads criados por dia (respeita todos os filtros)
+st.markdown("### 📅 Leads criados por dia")
+
+# Controles do gráfico
+detalhe = st.radio(
+    "Detalhar por",
+    ["Total", "Vendedora", "Canal de Origem"],
+    horizontal=True,
+    key="detalhe_diario",
+)
+mm_window = st.slider("Média móvel (dias)", 1, 14, 1, key="mm_diario")
+
+# Base diária (filtrada)
+base_daily = df[df["Criado"].notna()].copy()
+if base_daily.empty:
+    st.info("Nenhum lead com data de criação válida no intervalo/seleção atual.")
+else:
+    base_daily["Dia"] = base_daily["Criado"].dt.floor("D")
+
+    if detalhe == "Total":
+        g = (
+            base_daily.groupby("Dia")
+            .size()
+            .rename("Leads")
+            .reset_index()
+            .sort_values("Dia")
+        )
+        # média móvel global
+        g["MM"] = g["Leads"].rolling(mm_window, min_periods=1).mean()
+
+        chart = alt.layer(
+            alt.Chart(g)
+            .mark_bar()
+            .encode(
+                x=alt.X("Dia:T", title="Dia"),
+                y=alt.Y("Leads:Q", title="Leads"),
+                tooltip=[alt.Tooltip("Dia:T"), alt.Tooltip("Leads:Q", title="Leads")],
+            ),
+            alt.Chart(g)
+            .mark_line()
+            .encode(
+                x="Dia:T",
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.value("#10b981"),
+                tooltip=[alt.Tooltip("Dia:T"), alt.Tooltip("MM:Q", title="Média móvel")],
+            ),
+        )
+
+    elif detalhe == "Vendedora":
+        g = (
+            base_daily.groupby(["Dia", "Responsável"])
+            .size()
+            .rename("Leads")
+            .reset_index()
+            .sort_values(["Responsável", "Dia"])
+        )
+        # média móvel por vendedora
+        g["MM"] = (
+            g.groupby("Responsável")["Leads"]
+            .transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
+        )
+
+        chart = alt.layer(
+            alt.Chart(g)
+            .mark_bar()
+            .encode(
+                x=alt.X("Dia:T", title="Dia"),
+                y=alt.Y("Leads:Q", title="Leads"),
+                color=alt.Color("Responsável:N", legend=alt.Legend(title="Vendedora")),
+                tooltip=[
+                    alt.Tooltip("Dia:T"),
+                    alt.Tooltip("Responsável:N", title="Vendedora"),
+                    alt.Tooltip("Leads:Q", title="Leads"),
+                ],
+            ),
+            alt.Chart(g)
+            .mark_line()
+            .encode(
+                x="Dia:T",
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.Color("Responsável:N", legend=None),
+                tooltip=[
+                    alt.Tooltip("Dia:T"),
+                    alt.Tooltip("Responsável:N", title="Vendedora"),
+                    alt.Tooltip("MM:Q", title="Média móvel"),
+                ],
+            ),
+        )
+
+    else:  # detalhe == "Canal de Origem"
+        g = (
+            base_daily.groupby(["Dia", "Canal de Origem"])
+            .size()
+            .rename("Leads")
+            .reset_index()
+            .sort_values(["Canal de Origem", "Dia"])
+        )
+        # média móvel por canal
+        g["MM"] = (
+            g.groupby("Canal de Origem")["Leads"]
+            .transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
+        )
+
+        chart = alt.layer(
+            alt.Chart(g)
+            .mark_bar()
+            .encode(
+                x=alt.X("Dia:T", title="Dia"),
+                y=alt.Y("Leads:Q", title="Leads"),
+                color=alt.Color("Canal de Origem:N", legend=alt.Legend(title="Canal")),
+                tooltip=[
+                    alt.Tooltip("Dia:T"),
+                    alt.Tooltip("Canal de Origem:N", title="Canal"),
+                    alt.Tooltip("Leads:Q", title="Leads"),
+                ],
+            ),
+            alt.Chart(g)
+            .mark_line()
+            .encode(
+                x="Dia:T",
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.Color("Canal de Origem:N", legend=None),
+                tooltip=[
+                    alt.Tooltip("Dia:T"),
+                    alt.Tooltip("Canal de Origem:N", title="Canal"),
+                    alt.Tooltip("MM:Q", title="Média móvel"),
+                ],
+            ),
+        )
+
+    st.altair_chart(chart.properties(height=320), use_container_width=True)
 
 # =========================================================
 # Tabelas
