@@ -40,6 +40,11 @@ def pct(a, b):
 def count_set(series_norm, allowed_set):
     return series_norm.isin(allowed_set).sum()
 
+def full_dates(start, end):
+    """Retorna DataFrame com todas as datas entre start e end como coluna 'Dia' (datetime)."""
+    rng = pd.date_range(pd.to_datetime(start), pd.to_datetime(end), freq="D")
+    return pd.DataFrame({"Dia": pd.to_datetime(rng)})
+
 def read_crm_csv(uploaded_file) -> pd.DataFrame:
     raw = uploaded_file.getvalue()
     enc_used = "utf-8"
@@ -380,9 +385,9 @@ if not prospec_funil_df.empty:
         use_container_width=True
     )
 
-# Leads criados por dia — BARRAS LADO-A-LADO
+# ========================= Leads criados por dia — com dias zerados =========================
 st.markdown("### 📅 Leads criados por dia")
-detalhe = st.radio("Detalhar por", ["Total","Vendedora","Canal de Origem"], horizontal=True, key="detalhe_diario")
+detalhe = st.radio("Detalhar por", ["Total", "Vendedora", "Canal de Origem"], horizontal=True, key="detalhe_diario")
 show_mm = st.checkbox("Mostrar média móvel", value=True, key="mm_toggle")
 mm_window = st.slider("Janela da média móvel (dias)", 1, 14, 7, key="mm_diario", disabled=not show_mm)
 
@@ -391,78 +396,128 @@ if base_daily.empty:
     st.info("Nenhum lead com data de criação válida no intervalo/seleção atual.")
 else:
     base_daily["Dia"] = base_daily["Criado"].dt.floor("D")
+    # DataFrame com TODAS as datas do intervalo de filtros
+    all_days = full_dates(d_ini, d_fim)
 
     if detalhe == "Total":
-        g = base_daily.groupby("Dia").size().rename("Leads").reset_index().sort_values("Dia")
+        g = base_daily.groupby("Dia").size().rename("Leads").reset_index()
+        # left-join com TODAS as datas e preencher zeros
+        g = all_days.merge(g, on="Dia", how="left").fillna({"Leads": 0})
+        g = g.sort_values("Dia")
         if show_mm:
             g["MM"] = g["Leads"].rolling(mm_window, min_periods=1).mean()
+
         bars = alt.Chart(g).mark_bar().encode(
             x=alt.X("yearmonthdate(Dia):O", title="Dia", axis=alt.Axis(format="%d/%m")),
             y=alt.Y("Leads:Q", title="Leads"),
             tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"), alt.Tooltip("Leads:Q", title="Leads")],
         )
         labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
-            x=alt.X("yearmonthdate(Dia):O"), y="Leads:Q", text="Leads:Q", color=alt.value("#ffffff")
+            x=alt.X("yearmonthdate(Dia):O"),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
         )
         chart = bars + labels
         if show_mm:
             line = alt.Chart(g).mark_line(strokeWidth=2, color="#10b981").encode(
-                x=alt.X("yearmonthdate(Dia):O"), y=alt.Y("MM:Q", title="Média móvel"),
+                x=alt.X("yearmonthdate(Dia):O"),
+                y=alt.Y("MM:Q", title="Média móvel"),
                 tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"), alt.Tooltip("MM:Q", title="Média móvel")],
             )
             chart = chart + line
 
     elif detalhe == "Vendedora":
-        g = base_daily.groupby(["Dia","Responsável"]).size().rename("Leads").reset_index().sort_values(["Responsável","Dia"])
-        ordem_v = sorted(g["Responsável"].unique().tolist())
+        # categorias (já filtradas pelos checkboxes)
+        cats = sorted(base_daily["Responsável"].dropna().unique().tolist())
+        if not cats:
+            st.info("Nenhuma vendedora com dados no período/seleção atual.")
+            st.stop()
+
+        # cartesian product: todas as datas x todas as vendedoras
+        grid = all_days.assign(key=1)
+        cats_df = pd.DataFrame({"Responsável": cats}).assign(key=1)
+        cart = grid.merge(cats_df, on="key").drop(columns="key")
+
+        g = base_daily.groupby(["Dia", "Responsável"]).size().rename("Leads").reset_index()
+        # preencher datas ausentes com zero
+        g = cart.merge(g, on=["Dia", "Responsável"], how="left").fillna({"Leads": 0})
+        g = g.sort_values(["Responsável", "Dia"])
+
         bars = alt.Chart(g).mark_bar().encode(
             x=alt.X("yearmonthdate(Dia):O", title="Dia", axis=alt.Axis(format="%d/%m"),
                     scale=alt.Scale(paddingInner=0.2, paddingOuter=0.05)),
-            xOffset=alt.XOffset("Responsável:N", sort=ordem_v),
+            xOffset=alt.XOffset("Responsável:N", sort=cats),
             y=alt.Y("Leads:Q", title="Leads"),
-            color=alt.Color("Responsável:N", sort=ordem_v, legend=alt.Legend(title="Vendedora")),
-            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"), alt.Tooltip("Responsável:N"), alt.Tooltip("Leads:Q")],
+            color=alt.Color("Responsável:N", sort=cats, legend=alt.Legend(title="Vendedora")),
+            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"),
+                     alt.Tooltip("Responsável:N", title="Vendedora"),
+                     alt.Tooltip("Leads:Q")],
         )
         labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
             x=alt.X("yearmonthdate(Dia):O"),
-            xOffset=alt.XOffset("Responsável:N", sort=ordem_v),
-            y="Leads:Q", text="Leads:Q", color=alt.value("#ffffff"),
+            xOffset=alt.XOffset("Responsável:N", sort=cats),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
         )
         chart = bars + labels
         if show_mm:
-            g["MM"] = g.groupby("Responsável")["Leads"].transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
+            g["MM"] = g.groupby("Responsável")["Leads"].transform(
+                lambda s: s.rolling(mm_window, min_periods=1).mean()
+            )
             lines = alt.Chart(g).mark_line(strokeWidth=2).encode(
-                x=alt.X("yearmonthdate(Dia):O"), y=alt.Y("MM:Q", title="Média móvel"),
-                color=alt.Color("Responsável:N", sort=ordem_v, legend=None),
+                x=alt.X("yearmonthdate(Dia):O"),
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.Color("Responsável:N", sort=cats, legend=None),
             )
             chart = chart + lines
 
     else:  # Canal de Origem
-        g = base_daily.groupby(["Dia","Canal de Origem"]).size().rename("Leads").reset_index().sort_values(["Canal de Origem","Dia"])
-        ordem_c = sorted(g["Canal de Origem"].unique().tolist())
+        cats = sorted(base_daily["Canal de Origem"].dropna().unique().tolist())
+        if not cats:
+            st.info("Nenhum canal com dados no período/seleção atual.")
+            st.stop()
+
+        grid = all_days.assign(key=1)
+        cats_df = pd.DataFrame({"Canal de Origem": cats}).assign(key=1)
+        cart = grid.merge(cats_df, on="key").drop(columns="key")
+
+        g = base_daily.groupby(["Dia", "Canal de Origem"]).size().rename("Leads").reset_index()
+        g = cart.merge(g, on=["Dia", "Canal de Origem"], how="left").fillna({"Leads": 0})
+        g = g.sort_values(["Canal de Origem", "Dia"])
+
         bars = alt.Chart(g).mark_bar().encode(
             x=alt.X("yearmonthdate(Dia):O", title="Dia", axis=alt.Axis(format="%d/%m"),
                     scale=alt.Scale(paddingInner=0.2, paddingOuter=0.05)),
-            xOffset=alt.XOffset("Canal de Origem:N", sort=ordem_c),
+            xOffset=alt.XOffset("Canal de Origem:N", sort=cats),
             y=alt.Y("Leads:Q", title="Leads"),
-            color=alt.Color("Canal de Origem:N", sort=ordem_c, legend=alt.Legend(title="Canal")),
-            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"), alt.Tooltip("Canal de Origem:N"), alt.Tooltip("Leads:Q")],
+            color=alt.Color("Canal de Origem:N", sort=cats, legend=alt.Legend(title="Canal")),
+            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"),
+                     alt.Tooltip("Canal de Origem:N", title="Canal"),
+                     alt.Tooltip("Leads:Q")],
         )
         labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
             x=alt.X("yearmonthdate(Dia):O"),
-            xOffset=alt.XOffset("Canal de Origem:N", sort=ordem_c),
-            y="Leads:Q", text="Leads:Q", color=alt.value("#ffffff"),
+            xOffset=alt.XOffset("Canal de Origem:N", sort=cats),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
         )
         chart = bars + labels
         if show_mm:
-            g["MM"] = g.groupby("Canal de Origem")["Leads"].transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
+            g["MM"] = g.groupby("Canal de Origem")["Leads"].transform(
+                lambda s: s.rolling(mm_window, min_periods=1).mean()
+            )
             lines = alt.Chart(g).mark_line(strokeWidth=2).encode(
-                x=alt.X("yearmonthdate(Dia):O"), y=alt.Y("MM:Q", title="Média móvel"),
-                color=alt.Color("Canal de Origem:N", sort=ordem_c, legend=None),
+                x=alt.X("yearmonthdate(Dia):O"),
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.Color("Canal de Origem:N", sort=cats, legend=None),
             )
             chart = chart + lines
 
     st.altair_chart(chart.properties(height=380), use_container_width=True)
+
 
 # ========================= Tabelas =========================
 st.markdown("### 📄 Tabelas")
