@@ -302,10 +302,40 @@ vend_origem_df = pd.DataFrame(vend_origem_rows)
 # === Visão Geral (após filtros) ===
 st.markdown("### 📊 Visão Geral (após filtros)")
 
-# dataframe já filtrado pelos controles do painel
-dfv = df_filtrado.copy()  # use o mesmo nome que você já usa pro DF filtrado
+# Base segura
+dfv = df.copy()
 
-# escolha segura do nome da coluna de fase (caso você normalize em _fase_norm)
+# Garante datetime
+if "Criado" in dfv.columns and not pd.api.types.is_datetime64_any_dtype(dfv["Criado"]):
+    dfv["Criado"] = pd.to_datetime(dfv["Criado"], errors="coerce")
+
+# Aplica filtros se as variáveis existirem no script
+# Datas
+if "d_ini" in globals() and "d_fim" in globals() and "Criado" in dfv.columns:
+    dfv = dfv[
+        (dfv["Criado"].dt.normalize() >= pd.to_datetime(d_ini)) &
+        (dfv["Criado"].dt.normalize() <= pd.to_datetime(d_fim))
+    ]
+
+# Vendedoras (use o nome que você já tem; checo algumas opções comuns)
+for _vend_var in ["vendedores_sel", "vend_sel", "vendedoras_sel", "vendedoras_escolhidas"]:
+    if _vend_var in globals() and globals()[_vend_var]:
+        dfv = dfv[dfv["Responsável"].isin(globals()[_vend_var])]
+        break
+
+# Canais
+for _canal_var in ["canais_sel", "canal_sel", "canais_escolhidos"]:
+    if _canal_var in globals() and globals()[_canal_var]:
+        dfv = dfv[dfv["Canal de Origem"].isin(globals()[_canal_var])]
+        break
+
+# Foco em Prospecção Ativa (checkbox)
+for _focus_var in ["focus_prospec", "focar_prospec"]:
+    if _focus_var in globals() and globals()[_focus_var]:
+        dfv = dfv[dfv["Canal de Origem"] == "Prospecção Ativa"]
+        break
+
+# Nome da coluna de fase
 fase_col = "_fase_norm" if "_fase_norm" in dfv.columns else "Fase"
 
 # KPIs
@@ -314,7 +344,7 @@ total_reunioes = int(dfv[fase_col].isin({"Agendando Reunião", "Reuniões Agenda
 total_em_proposta = int((dfv[fase_col] == "Proposta e Negociação").sum())
 total_vendas = int((dfv[fase_col] == "Negócio Fechado").sum())
 
-# 4 cartões, no mesmo layout dos demais
+# Cards (mesmo layout)
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown("**Leads (Total)**")
