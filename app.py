@@ -1,8 +1,9 @@
-# app.py — Relatório CRM — v8 (filtros por canal nos gráficos de vendedora)
-# - Ordem/cores fixas nos detalhamentos
-# - Canal "Base CLT/SEC"
-# - Gráficos e tabelas por vendedora respeitam filtros de canal (com toggle "apenas Prospecção Ativa")
-# - PDF e Excel atualizados
+# app.py — Relatório CRM — v9
+# - Gráfico "Leads por dia" com barras lado-a-lado (Vendedora/Canal) + labels + toggle de média móvel
+# - Filtros com UX melhor (Todos/Limpar + atalhos)
+# - Gráficos/tabelas por vendedora respeitam filtros de canal (toggle opcional só Prospecção)
+# - Ordem/cores fixas nos gráficos de fases
+# - Canal "Base CLT/SEC" incluído
 
 import streamlit as st
 import pandas as pd
@@ -16,8 +17,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="Relatório CRM — v8", layout="wide")
-st.title("Gerador de Relatório CRM — v8 (Gráficos + Filtros + PDF)")
+st.set_page_config(page_title="Relatório CRM — v9", layout="wide")
+st.title("Gerador de Relatório CRM — v9 (Gráficos + Filtros + PDF)")
 st.caption("Envie o CSV do CRM (separador ';' ou ','). O app detecta o separador e o encoding automaticamente.")
 
 # =========================================================
@@ -166,27 +167,68 @@ canal_ordem = [
 ]
 
 # =========================================================
-# Filtros
+# Filtros (UX melhorado)
 # =========================================================
 st.sidebar.header("Filtros")
 
+def multi_select_with_buttons(label, options, default_all=True, key=""):
+    if default_all:
+        default = options
+    else:
+        default = []
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+    cols = st.sidebar.columns([3, 1, 1])
+    with cols[0]:
+        sel = st.multiselect(label, options=options, default=st.session_state[key], key=f"ms_{key}")
+    with cols[1]:
+        if st.button("Todos", key=f"all_{key}"):
+            st.session_state[key] = options
+            st.rerun()
+    with cols[2]:
+        if st.button("Limpar", key=f"clear_{key}"):
+            st.session_state[key] = []
+            st.rerun()
+
+    st.session_state[key] = st.session_state[f"ms_{key}"]
+    return st.session_state[key]
+
+# período
 min_d = pd.to_datetime(df["Criado"].min()).date() if df["Criado"].notna().any() else date.today()
 max_d = pd.to_datetime(df["Criado"].max()).date() if df["Criado"].notna().any() else date.today()
 d_ini, d_fim = st.sidebar.date_input("Período (Criado)", value=(min_d, max_d))
 if isinstance(d_ini, tuple):
     d_ini, d_fim = d_ini
 
+# vendedoras
 vendedoras = sorted(df["Responsável"].dropna().unique().tolist())
-sel_vendedoras = st.sidebar.multiselect("Vendedoras", options=vendedoras, default=vendedoras)
+sel_vendedoras = multi_select_with_buttons("Vendedoras", vendedoras, default_all=True, key="vendedoras")
 
+# canais (ordenados + extras)
 canais = [c for c in canal_ordem if c in df["Canal de Origem"].unique()] + sorted(
     [c for c in df["Canal de Origem"].unique() if c not in canal_ordem]
 )
-sel_canais = st.sidebar.multiselect("Canais de Origem", options=canais, default=canais)
 
-# Toggle opcional: focar apenas Prospecção Ativa nos gráficos/tabelas por vendedora
+# atalhos
+canais_mkt = ["Google Ads", "Trafego Pago - Face", "Trafego Pago - Insta", "Impulsionamento Instagram", "Inbound"]
+c1, c2, c3 = st.sidebar.columns(3)
+if c1.button("Somente Mkt"):
+    st.session_state["canais"] = [c for c in canais if c in canais_mkt]
+    st.rerun()
+if c2.button("Somente Prospecção"):
+    st.session_state["canais"] = [c for c in canais if c == "Prospecção Ativa"]
+    st.rerun()
+if c3.button("Exceto Outros"):
+    st.session_state["canais"] = [c for c in canais if c != "Outros"]
+    st.rerun()
+
+sel_canais = multi_select_with_buttons("Canais de Origem", canais, default_all=True, key="canais")
+
+# toggle: focar apenas Prospecção Ativa para os gráficos por vendedora
 only_prospec = st.sidebar.checkbox("Focar apenas em Prospecção Ativa (gráficos por vendedora)", value=False)
 
+# aplica filtros
 mask = pd.Series(True, index=df.index)
 if df["Criado"].notna().any():
     mask &= df["Criado"].dt.date.between(d_ini, d_fim)
@@ -196,8 +238,6 @@ if sel_canais:
     mask &= df["Canal de Origem"].isin(sel_canais)
 
 df = df[mask].copy()
-
-# Base para as análises por vendedora
 base_vendedora_df = df if not only_prospec else df[df["Canal de Origem"] == "Prospecção Ativa"]
 
 # =========================================================
@@ -352,14 +392,13 @@ if not prospec_funil_df.empty:
             tot[c] = prospec_funil_df[c].sum()
     prospec_funil_df = pd.concat([prospec_funil_df, pd.DataFrame([tot])], ignore_index=True)
 
-# 5) Resumo por Vendedora × Origem (mantido: marketing vs prospecção)
-canais_mkt = ["Google Ads", "Trafego Pago - Face", "Trafego Pago - Insta", "Impulsionamento Instagram", "Inbound"]
+# 5) Resumo por Vendedora × Origem (Mkt vs Prospecção)
 vend_origem_rows = []
 for resp in sorted(df["Responsável"].dropna().unique()):
     g = df[df["Responsável"] == resp]
     for origem, mask in {
         "Prospecção Ativa": g["Canal de Origem"].eq("Prospecção Ativa"),
-        "Leads de Mkt": g["Canal de Origem"].isin(canais_mkt),
+        "Leads de Mkt": g["Canal de Origem"].isin(["Google Ads","Trafego Pago - Face","Trafego Pago - Insta","Impulsionamento Instagram","Inbound"]),
     }.items():
         sub = g[mask]
         leads = len(sub)
@@ -424,16 +463,13 @@ phase_colors = [
     "#ef4444",  # Outros/Perdido
 ]
 
-# --- Gráfico 2: Fases x Canal (empilhado normalizado; tooltip mostra Quantidade)
+# --- Gráfico 2: Fases x Canal (empilhado normalizado; tooltip = Quantidade)
 fases_cols = [
     "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
     "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
 ]
 melt = funil_df[funil_df["Canal de Origem"] != "TOTAL"].melt(
-    id_vars=["Canal de Origem"],
-    value_vars=fases_cols,
-    var_name="Fase",
-    value_name="Qtd",
+    id_vars=["Canal de Origem"], value_vars=fases_cols, var_name="Fase", value_name="Qtd",
 )
 # índice para controlar a ordem de empilhamento
 phase_rank = {name: i for i, name in enumerate(phase_order)}
@@ -451,11 +487,7 @@ chart_stack = (
             scale=alt.Scale(domain=phase_order, range=phase_colors),
             legend=alt.Legend(title="Fase")
         ),
-        tooltip=[
-            alt.Tooltip("Canal de Origem:N"),
-            alt.Tooltip("Fase:N"),
-            alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
-        ],
+        tooltip=[alt.Tooltip("Canal de Origem:N"), alt.Tooltip("Fase:N"), alt.Tooltip("sum(Qtd):Q", title="Quantidade")],
         order=alt.Order("fase_ord:Q", sort="ascending"),
     )
 )
@@ -469,11 +501,7 @@ chart_conv = alt.Chart(conv_melt).mark_bar().encode(
     x=alt.X("Valor:Q", title="%"),
     y=alt.Y("Canal de Origem:N", sort="-x"),
     color="Métrica:N",
-    tooltip=[
-        alt.Tooltip("Canal de Origem:N"),
-        alt.Tooltip("Métrica:N"),
-        alt.Tooltip("Valor:Q", title="%"),
-    ],
+    tooltip=[alt.Tooltip("Canal de Origem:N"), alt.Tooltip("Métrica:N"), alt.Tooltip("Valor:Q", title="%")],
 )
 st.altair_chart(chart_conv.properties(height=280), use_container_width=True)
 
@@ -510,10 +538,7 @@ if not prospec_funil_df.empty:
         if col not in pf_plot.columns:
             pf_plot[col] = 0
 
-    melted_v = pf_plot.melt(
-        id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd"
-    )
-    phase_rank = {name: i for i, name in enumerate(phase_order)}
+    melted_v = pf_plot.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
     melted_v["fase_ord"] = melted_v["Fase"].map(phase_rank).astype("int64")
 
     chart_pf = (
@@ -522,36 +547,23 @@ if not prospec_funil_df.empty:
         .encode(
             x=alt.X("sum(Qtd):Q", stack="zero", title="Quantidade"),
             y=alt.Y("Vendedora:N", sort="-x"),
-            color=alt.Color(
-                "Fase:N",
-                sort=phase_order,
-                scale=alt.Scale(domain=phase_order, range=phase_colors),
-                legend=alt.Legend(title="Fase"),
-            ),
-            tooltip=[
-                alt.Tooltip("Vendedora:N"),
-                alt.Tooltip("Fase:N"),
-                alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
-            ],
+            color=alt.Color("Fase:N", sort=phase_order, scale=alt.Scale(domain=phase_order, range=phase_colors),
+                            legend=alt.Legend(title="Fase")),
+            tooltip=[alt.Tooltip("Vendedora:N"), alt.Tooltip("Fase:N"), alt.Tooltip("sum(Qtd):Q", title="Quantidade")],
             order=alt.Order("fase_ord:Q", sort="ascending"),
         )
         .properties(height=320)
     )
     st.altair_chart(chart_pf, use_container_width=True)
-    
+
 # --- Gráfico 6: Leads criados por dia (respeita todos os filtros)
 st.markdown("### 📅 Leads criados por dia")
+detalhe = st.radio("Detalhar por", ["Total", "Vendedora", "Canal de Origem"], horizontal=True, key="detalhe_diario")
 
-# Controles do gráfico
-detalhe = st.radio(
-    "Detalhar por",
-    ["Total", "Vendedora", "Canal de Origem"],
-    horizontal=True,
-    key="detalhe_diario",
-)
-mm_window = st.slider("Média móvel (dias)", 1, 14, 1, key="mm_diario")
+# Toggle de média móvel
+show_mm = st.checkbox("Mostrar média móvel", value=True, key="mm_toggle")
+mm_window = st.slider("Janela da média móvel (dias)", 1, 14, 7, key="mm_diario", disabled=not show_mm)
 
-# Base diária (filtrada)
 base_daily = df[df["Criado"].notna()].copy()
 if base_daily.empty:
     st.info("Nenhum lead com data de criação válida no intervalo/seleção atual.")
@@ -559,117 +571,99 @@ else:
     base_daily["Dia"] = base_daily["Criado"].dt.floor("D")
 
     if detalhe == "Total":
-        g = (
-            base_daily.groupby("Dia")
-            .size()
-            .rename("Leads")
-            .reset_index()
-            .sort_values("Dia")
-        )
-        # média móvel global
-        g["MM"] = g["Leads"].rolling(mm_window, min_periods=1).mean()
+        g = base_daily.groupby("Dia").size().rename("Leads").reset_index().sort_values("Dia")
+        if show_mm:
+            g["MM"] = g["Leads"].rolling(mm_window, min_periods=1).mean()
 
-        chart = alt.layer(
-            alt.Chart(g)
-            .mark_bar()
-            .encode(
-                x=alt.X("Dia:T", title="Dia"),
-                y=alt.Y("Leads:Q", title="Leads"),
-                tooltip=[alt.Tooltip("Dia:T"), alt.Tooltip("Leads:Q", title="Leads")],
-            ),
-            alt.Chart(g)
-            .mark_line()
-            .encode(
-                x="Dia:T",
-                y=alt.Y("MM:Q", title="Média móvel"),
-                color=alt.value("#10b981"),
-                tooltip=[alt.Tooltip("Dia:T"), alt.Tooltip("MM:Q", title="Média móvel")],
-            ),
+        bars = alt.Chart(g).mark_bar().encode(
+            x=alt.X("Dia:T", title="Dia", axis=alt.Axis(format="%d/%m")),
+            y=alt.Y("Leads:Q", title="Leads"),
+            tooltip=[alt.Tooltip("Dia:T", title="Dia", format="%d/%m/%Y"),
+                     alt.Tooltip("Leads:Q", title="Leads")],
         )
+        labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
+            x="Dia:T", y="Leads:Q", text="Leads:Q", color=alt.value("#ffffff")
+        )
+        chart = bars + labels
+        if show_mm:
+            line = alt.Chart(g).mark_line(strokeWidth=2, color="#10b981").encode(
+                x="Dia:T", y=alt.Y("MM:Q", title="Média móvel"),
+                tooltip=[alt.Tooltip("Dia:T", title="Dia", format="%d/%m/%Y"),
+                         alt.Tooltip("MM:Q", title="Média móvel")],
+            )
+            chart = chart + line
 
     elif detalhe == "Vendedora":
         g = (
             base_daily.groupby(["Dia", "Responsável"])
-            .size()
-            .rename("Leads")
-            .reset_index()
-            .sort_values(["Responsável", "Dia"])
+            .size().rename("Leads").reset_index().sort_values(["Responsável", "Dia"])
         )
-        # média móvel por vendedora
-        g["MM"] = (
-            g.groupby("Responsável")["Leads"]
-            .transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
-        )
+        ordem_v = sorted(g["Responsável"].unique().tolist())
 
-        chart = alt.layer(
-            alt.Chart(g)
-            .mark_bar()
-            .encode(
-                x=alt.X("Dia:T", title="Dia"),
-                y=alt.Y("Leads:Q", title="Leads"),
-                color=alt.Color("Responsável:N", legend=alt.Legend(title="Vendedora")),
-                tooltip=[
-                    alt.Tooltip("Dia:T"),
-                    alt.Tooltip("Responsável:N", title="Vendedora"),
-                    alt.Tooltip("Leads:Q", title="Leads"),
-                ],
-            ),
-            alt.Chart(g)
-            .mark_line()
-            .encode(
+        bars = alt.Chart(g).mark_bar().encode(
+            x=alt.X("Dia:T", title="Dia", axis=alt.Axis(format="%d/%m"),
+                    scale=alt.Scale(paddingInner=0.2, paddingOuter=0.05)),
+            xOffset=alt.XOffset("Responsável:N", sort=ordem_v),
+            y=alt.Y("Leads:Q", title="Leads"),
+            color=alt.Color("Responsável:N", sort=ordem_v, legend=alt.Legend(title="Vendedora")),
+            tooltip=[alt.Tooltip("Dia:T", title="Dia", format="%d/%m/%Y"),
+                     alt.Tooltip("Responsável:N", title="Vendedora"),
+                     alt.Tooltip("Leads:Q", title="Leads")],
+        )
+        labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
+            x=alt.X("Dia:T"),
+            xOffset=alt.XOffset("Responsável:N", sort=ordem_v),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
+        )
+        chart = bars + labels
+
+        if show_mm:
+            g["MM"] = g.groupby("Responsável")["Leads"].transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
+            lines = alt.Chart(g).mark_line(strokeWidth=2).encode(
                 x="Dia:T",
                 y=alt.Y("MM:Q", title="Média móvel"),
-                color=alt.Color("Responsável:N", legend=None),
-                tooltip=[
-                    alt.Tooltip("Dia:T"),
-                    alt.Tooltip("Responsável:N", title="Vendedora"),
-                    alt.Tooltip("MM:Q", title="Média móvel"),
-                ],
-            ),
-        )
+                color=alt.Color("Responsável:N", sort=ordem_v, legend=None),
+            )
+            chart = chart + lines
 
     else:  # detalhe == "Canal de Origem"
         g = (
             base_daily.groupby(["Dia", "Canal de Origem"])
-            .size()
-            .rename("Leads")
-            .reset_index()
-            .sort_values(["Canal de Origem", "Dia"])
+            .size().rename("Leads").reset_index().sort_values(["Canal de Origem", "Dia"])
         )
-        # média móvel por canal
-        g["MM"] = (
-            g.groupby("Canal de Origem")["Leads"]
-            .transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
-        )
+        ordem_c = sorted(g["Canal de Origem"].unique().tolist())
 
-        chart = alt.layer(
-            alt.Chart(g)
-            .mark_bar()
-            .encode(
-                x=alt.X("Dia:T", title="Dia"),
-                y=alt.Y("Leads:Q", title="Leads"),
-                color=alt.Color("Canal de Origem:N", legend=alt.Legend(title="Canal")),
-                tooltip=[
-                    alt.Tooltip("Dia:T"),
-                    alt.Tooltip("Canal de Origem:N", title="Canal"),
-                    alt.Tooltip("Leads:Q", title="Leads"),
-                ],
-            ),
-            alt.Chart(g)
-            .mark_line()
-            .encode(
+        bars = alt.Chart(g).mark_bar().encode(
+            x=alt.X("Dia:T", title="Dia", axis=alt.Axis(format="%d/%m"),
+                    scale=alt.Scale(paddingInner=0.2, paddingOuter=0.05)),
+            xOffset=alt.XOffset("Canal de Origem:N", sort=ordem_c),
+            y=alt.Y("Leads:Q", title="Leads"),
+            color=alt.Color("Canal de Origem:N", sort=ordem_c, legend=alt.Legend(title="Canal")),
+            tooltip=[alt.Tooltip("Dia:T", title="Dia", format="%d/%m/%Y"),
+                     alt.Tooltip("Canal de Origem:N", title="Canal"),
+                     alt.Tooltip("Leads:Q", title="Leads")],
+        )
+        labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
+            x=alt.X("Dia:T"),
+            xOffset=alt.XOffset("Canal de Origem:N", sort=ordem_c),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
+        )
+        chart = bars + labels
+
+        if show_mm:
+            g["MM"] = g.groupby("Canal de Origem")["Leads"].transform(lambda s: s.rolling(mm_window, min_periods=1).mean())
+            lines = alt.Chart(g).mark_line(strokeWidth=2).encode(
                 x="Dia:T",
                 y=alt.Y("MM:Q", title="Média móvel"),
-                color=alt.Color("Canal de Origem:N", legend=None),
-                tooltip=[
-                    alt.Tooltip("Dia:T"),
-                    alt.Tooltip("Canal de Origem:N", title="Canal"),
-                    alt.Tooltip("MM:Q", title="Média móvel"),
-                ],
-            ),
-        )
+                color=alt.Color("Canal de Origem:N", sort=ordem_c, legend=None),
+            )
+            chart = chart + lines
 
-    st.altair_chart(chart.properties(height=320), use_container_width=True)
+    st.altair_chart(chart.properties(height=380), use_container_width=True)
 
 # =========================================================
 # Tabelas
