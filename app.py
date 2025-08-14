@@ -419,12 +419,18 @@ fases_cols = [
     "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
     "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
 ]
+
 melt = funil_df[funil_df["Canal de Origem"] != "TOTAL"].melt(
     id_vars=["Canal de Origem"],
     value_vars=fases_cols,
     var_name="Fase",
     value_name="Qtd",
 )
+
+# índice para controlar a ordem de empilhamento (esquerda -> direita)
+phase_rank = {name: i for i, name in enumerate(phase_order)}
+melt["fase_ord"] = melt["Fase"].map(phase_rank).astype("int64")
+
 chart_stack = (
     alt.Chart(melt)
     .mark_bar()
@@ -433,6 +439,7 @@ chart_stack = (
         y=alt.Y("Canal de Origem:N", sort="-x"),
         color=alt.Color(
             "Fase:N",
+            sort=phase_order,                                   # legenda na ordem pedida
             scale=alt.Scale(domain=phase_order, range=phase_colors),
             legend=alt.Legend(title="Fase")
         ),
@@ -441,7 +448,7 @@ chart_stack = (
             alt.Tooltip("Fase:N"),
             alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
         ],
-        order=alt.Order('Fase', sort='ascending')  # respeita a ordem do domain
+        order=alt.Order("fase_ord:Q", sort="ascending"),         # controla a pilha (E->D)
     )
 )
 st.altair_chart(chart_stack.properties(height=350), use_container_width=True)
@@ -491,11 +498,16 @@ if not prospec_funil_df.empty:
         "Sem retorno",
         "Outros/Perdido",
     ]
-    # precisamos reordenar as colunas na mesma ordem antes de derreter
     for col in fases_plot:
         if col not in pf_plot.columns:
             pf_plot[col] = 0
-    melted_v = pf_plot.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
+
+    melted_v = pf_plot.melt(
+        id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd"
+    )
+    # índice para empilhamento na ordem desejada
+    phase_rank = {name: i for i, name in enumerate(phase_order)}
+    melted_v["fase_ord"] = melted_v["Fase"].map(phase_rank).astype("int64")
 
     chart_pf = (
         alt.Chart(melted_v)
@@ -505,15 +517,16 @@ if not prospec_funil_df.empty:
             y=alt.Y("Vendedora:N", sort="-x"),
             color=alt.Color(
                 "Fase:N",
+                sort=phase_order,
                 scale=alt.Scale(domain=phase_order, range=phase_colors),
-                legend=alt.Legend(title="Fase")
+                legend=alt.Legend(title="Fase"),
             ),
             tooltip=[
                 alt.Tooltip("Vendedora:N"),
                 alt.Tooltip("Fase:N"),
                 alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
             ],
-            order=alt.Order('Fase', sort='ascending')
+            order=alt.Order("fase_ord:Q", sort="ascending"),
         )
         .properties(height=320)
     )
