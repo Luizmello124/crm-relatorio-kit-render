@@ -299,11 +299,35 @@ for resp in sorted(df["Responsável"].dropna().unique()):
 vend_origem_df = pd.DataFrame(vend_origem_rows)
 
 # ========================= Visão geral =========================
+# === Visão Geral (após filtros) ===
 st.markdown("### 📊 Visão Geral (após filtros)")
-m1, m2, m3 = st.columns(3)
-with m1: st.metric("Leads (Total)", len(df))
-with m2: st.metric("Reuniões (Total)", int(count_set(df["_fase_norm"], labels_reuniao_all)))
-with m3: st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
+
+# dataframe já filtrado pelos controles do painel
+dfv = df_filtrado.copy()  # use o mesmo nome que você já usa pro DF filtrado
+
+# escolha segura do nome da coluna de fase (caso você normalize em _fase_norm)
+fase_col = "_fase_norm" if "_fase_norm" in dfv.columns else "Fase"
+
+# KPIs
+total_leads = int(len(dfv))
+total_reunioes = int(dfv[fase_col].isin({"Agendando Reunião", "Reuniões Agendadas"}).sum())
+total_em_proposta = int((dfv[fase_col] == "Proposta e Negociação").sum())
+total_vendas = int((dfv[fase_col] == "Negócio Fechado").sum())
+
+# 4 cartões, no mesmo layout dos demais
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.markdown("**Leads (Total)**")
+    st.markdown(f"<h2 style='margin-top:0'>{total_leads}</h2>", unsafe_allow_html=True)
+with c2:
+    st.markdown("**Reuniões (Total)**")
+    st.markdown(f"<h2 style='margin-top:0'>{total_reunioes}</h2>", unsafe_allow_html=True)
+with c3:
+    st.markdown("**Em Proposta**")
+    st.markdown(f"<h2 style='margin-top:0'>{total_em_proposta}</h2>", unsafe_allow_html=True)
+with c4:
+    st.markdown("**Vendas (Total)**")
+    st.markdown(f"<h2 style='margin-top:0'>{total_vendas}</h2>", unsafe_allow_html=True)
 
 # Paleta e ordem fixa das fases
 phase_order = ["Em Atendimento","Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado",
