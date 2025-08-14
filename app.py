@@ -300,10 +300,15 @@ vend_origem_df = pd.DataFrame(vend_origem_rows)
 
 # ========================= Visão geral =========================
 st.markdown("### 📊 Visão Geral (após filtros)")
-m1, m2, m3 = st.columns(3)
-with m1: st.metric("Leads (Total)", len(df))
-with m2: st.metric("Reuniões (Total)", int(count_set(df["_fase_norm"], labels_reuniao_all)))
-with m3: st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.metric("Leads (Total)", len(df))
+with m2:
+    st.metric("Reuniões (Total)", int(count_set(df["_fase_norm"], labels_reuniao_all)))
+with m3:
+    st.metric("Em Proposta (Total)", int(count_set(df["_fase_norm"], labels_proposta)))
+with m4:
+    st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
 
 # Paleta e ordem fixa das fases
 phase_order = ["Em Atendimento","Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado",
@@ -552,7 +557,13 @@ pdf_bytes = BytesIO()
 with PdfPages(pdf_bytes) as pdf:
     fig = plt.figure(figsize=(10,6)); plt.axis("off")
     periodo_txt = f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}"
-    resumo = f"Período: {periodo_txt}\nLeads: {len(df)} | Reuniões: {int(count_set(df['_fase_norm'], labels_reuniao_all))} | Vendas: {int(count_set(df['_fase_norm'], labels_venda))}"
+    resumo = (
+    f"Período: {periodo_txt}\n"
+    f"Leads: {len(df)} | "
+    f"Reuniões: {int(count_set(df['_fase_norm'], labels_reuniao_all))} | "
+    f"Em Proposta: {int(count_set(df['_fase_norm'], labels_proposta))} | "
+    f"Vendas: {int(count_set(df['_fase_norm'], labels_venda))}"
+)
     plt.text(0.05, 0.75, "Relatório CRM", fontsize=24, weight="bold")
     plt.text(0.05, 0.6, resumo, fontsize=14)
     pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
