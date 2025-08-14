@@ -1,5 +1,8 @@
-# app.py — Relatório CRM (robusto) — v7
-# Ajustes: ordem fixa das fases + cores; funil por vendedora com eixo em quantidade
+# app.py — Relatório CRM — v8 (filtros por canal nos gráficos de vendedora)
+# - Ordem/cores fixas nos detalhamentos
+# - Canal "Base CLT/SEC"
+# - Gráficos e tabelas por vendedora respeitam filtros de canal (com toggle "apenas Prospecção Ativa")
+# - PDF e Excel atualizados
 
 import streamlit as st
 import pandas as pd
@@ -13,8 +16,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="Relatório CRM — v7", layout="wide")
-st.title("Gerador de Relatório CRM — v7 (Gráficos + Filtros + PDF)")
+st.set_page_config(page_title="Relatório CRM — v8", layout="wide")
+st.title("Gerador de Relatório CRM — v8 (Gráficos + Filtros + PDF)")
 st.caption("Envie o CSV do CRM (separador ';' ou ','). O app detecta o separador e o encoding automaticamente.")
 
 # =========================================================
@@ -47,16 +50,15 @@ def pct(a, b):
 def count_set(series_norm, allowed_set):
     return series_norm.isin(allowed_set).sum()
 
-# ---------- leitor ROBUSTO do CSV ----------
 def read_crm_csv(uploaded_file) -> pd.DataFrame:
-    """
-    - Detecta encoding (utf-8 ou latin1)
-    - Detecta delimitador (; ou ,)
-    - Ignora linhas quebradas (on_bad_lines='skip')
+    """Leitor robusto:
+      - detecta encoding (utf-8/latin1)
+      - detecta delimitador (;/,)
+      - ignora linhas ruins (on_bad_lines='skip')
     """
     raw = uploaded_file.getvalue()
 
-    # 1) Tenta decodificar
+    # encoding
     enc_used = "utf-8"
     for enc in ("utf-8", "latin1"):
         try:
@@ -67,11 +69,10 @@ def read_crm_csv(uploaded_file) -> pd.DataFrame:
             continue
     text = raw.decode(enc_used, errors="ignore")
 
-    # 2) Detecta delimitador por amostragem
+    # delimitador
     sample = "\n".join(text.splitlines()[:20])
     delim = ";" if sample.count(";") >= sample.count(",") else ","
 
-    # 3) Lê com pandas a partir de bytes
     return pd.read_csv(
         BytesIO(raw),
         sep=delim,
@@ -105,7 +106,6 @@ expected = {
     "Nome do Negócio": ["Nome do Negócio", "Nome do negocio", "Nome do negócio"],
     "Fonte": ["Fonte"],
     "Criado": ["Criado", "Data de criação", "Data de criacao"],
-    # no CRM existem 2 "Motivo de perda"; queremos a SEGUNDA (normalmente 'Motivo de perda.1')
     "Motivo de perda": ["Motivo de perda.1", "Motivo de perda_1", "Motivo de perda 1"],
 }
 
@@ -184,6 +184,9 @@ canais = [c for c in canal_ordem if c in df["Canal de Origem"].unique()] + sorte
 )
 sel_canais = st.sidebar.multiselect("Canais de Origem", options=canais, default=canais)
 
+# Toggle opcional: focar apenas Prospecção Ativa nos gráficos/tabelas por vendedora
+only_prospec = st.sidebar.checkbox("Focar apenas em Prospecção Ativa (gráficos por vendedora)", value=False)
+
 mask = pd.Series(True, index=df.index)
 if df["Criado"].notna().any():
     mask &= df["Criado"].dt.date.between(d_ini, d_fim)
@@ -194,8 +197,11 @@ if sel_canais:
 
 df = df[mask].copy()
 
+# Base para as análises por vendedora
+base_vendedora_df = df if not only_prospec else df[df["Canal de Origem"] == "Prospecção Ativa"]
+
 # =========================================================
-# Labels / Conjuntos
+# Labels / Conjuntos de fases
 # =========================================================
 label_perdidos = {
     "Sem retorno": {"sem retorno"},
@@ -211,7 +217,7 @@ labels_proposta = {"proposta e negociacao"}
 labels_venda = {"negocio fechado", "negocios fechados"}
 
 # =========================================================
-# Tabelas
+# Tabelas por canal
 # =========================================================
 # 1) Funil Comercial do Período
 funil_rows = []
@@ -283,9 +289,13 @@ conv_rows.append(
 )
 conv_df = pd.DataFrame(conv_rows)
 
-# 3) Prospecção Ativa — Resumo por Vendedora
-todas_vendedoras = sorted(df["Responsável"].dropna().unique().tolist())
-prospec = df[df["Canal de Origem"] == "Prospecção Ativa"]
+# =========================================================
+# Tabelas/Agregações por Vendedora (respeitando filtros de canal)
+# =========================================================
+todas_vendedoras = sorted(base_vendedora_df["Responsável"].dropna().unique().tolist())
+
+# 3) Resumo por Vendedora
+prospec = base_vendedora_df
 prospec_rows = []
 for resp in todas_vendedoras:
     g = prospec[prospec["Responsável"] == resp]
@@ -314,11 +324,11 @@ prospec_rows.append(
 )
 prospec_resumo_df = pd.DataFrame(prospec_rows)
 
-# 4) Prospecção Ativa — Funil Detalhado por Vendedora (tabela)
+# 4) Funil detalhado por Vendedora (tabela)
 prospec_funil_rows = []
 for resp in todas_vendedoras:
-    g = prospec[prospec["Responsável"] == resp]
-    row = {"Vendedora": resp, "Leads Gerados (prospecção ativa)": len(g)}
+    g = base_vendedora_df[base_vendedora_df["Responsável"] == resp]
+    row = {"Vendedora": resp, "Leads Gerados (base filtrada)": len(g)}
     row["Sem retorno"] = count_set(g["_fase_norm"], {"sem retorno"})
     row["Sem Interesse"] = count_set(g["_fase_norm"], {"sem interesse"})
     row["Fora do Perfil"] = count_set(g["_fase_norm"], {"fora do perfil"})
@@ -332,7 +342,7 @@ for resp in todas_vendedoras:
         "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
         "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado"
     ])
-    row["Em Atendimento"] = max(row["Leads Gerados (prospecção ativa)"] - anteriores, 0)
+    row["Em Atendimento"] = max(row["Leads Gerados (base filtrada)"] - anteriores, 0)
     prospec_funil_rows.append(row)
 prospec_funil_df = pd.DataFrame(prospec_funil_rows)
 if not prospec_funil_df.empty:
@@ -342,10 +352,10 @@ if not prospec_funil_df.empty:
             tot[c] = prospec_funil_df[c].sum()
     prospec_funil_df = pd.concat([prospec_funil_df, pd.DataFrame([tot])], ignore_index=True)
 
-# 5) Resumo por Vendedora × Origem
+# 5) Resumo por Vendedora × Origem (mantido: marketing vs prospecção)
 canais_mkt = ["Google Ads", "Trafego Pago - Face", "Trafego Pago - Insta", "Impulsionamento Instagram", "Inbound"]
 vend_origem_rows = []
-for resp in todas_vendedoras:
+for resp in sorted(df["Responsável"].dropna().unique()):
     g = df[df["Responsável"] == resp]
     for origem, mask in {
         "Prospecção Ativa": g["Canal de Origem"].eq("Prospecção Ativa"),
@@ -388,7 +398,7 @@ chart_leads = alt.Chart(base).mark_bar().encode(
 )
 st.altair_chart(chart_leads.properties(height=300), use_container_width=True)
 
-# Paleta e ORDEM fixa das fases (conforme solicitado)
+# Paleta e ORDEM fixa das fases
 phase_order = [
     "Em Atendimento",
     "Agendando Reunião",
@@ -402,15 +412,15 @@ phase_order = [
     "Outros/Perdido",
 ]
 phase_colors = [
-    "#fbbf24",  # Em Atendimento - amarelo
-    "#86efac",  # Agendando Reunião - verde claro
+    "#fbbf24",  # Em Atendimento
+    "#86efac",  # Agendando Reunião
     "#4ade80",  # Reuniões Agendadas
     "#22c55e",  # Proposta e Negociação
     "#16a34a",  # Negócio Fechado
-    "#fca5a5",  # Abaixo de R$500K - vermelho claro
+    "#fca5a5",  # Abaixo de R$500K
     "#f87171",  # Fora do Perfil
     "#dc2626",  # Sem Interesse
-    "#991b1b",  # Sem retorno - vermelho escuro
+    "#991b1b",  # Sem retorno
     "#ef4444",  # Outros/Perdido
 ]
 
@@ -419,15 +429,13 @@ fases_cols = [
     "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
     "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"
 ]
-
 melt = funil_df[funil_df["Canal de Origem"] != "TOTAL"].melt(
     id_vars=["Canal de Origem"],
     value_vars=fases_cols,
     var_name="Fase",
     value_name="Qtd",
 )
-
-# índice para controlar a ordem de empilhamento (esquerda -> direita)
+# índice para controlar a ordem de empilhamento
 phase_rank = {name: i for i, name in enumerate(phase_order)}
 melt["fase_ord"] = melt["Fase"].map(phase_rank).astype("int64")
 
@@ -439,7 +447,7 @@ chart_stack = (
         y=alt.Y("Canal de Origem:N", sort="-x"),
         color=alt.Color(
             "Fase:N",
-            sort=phase_order,                                   # legenda na ordem pedida
+            sort=phase_order,
             scale=alt.Scale(domain=phase_order, range=phase_colors),
             legend=alt.Legend(title="Fase")
         ),
@@ -448,7 +456,7 @@ chart_stack = (
             alt.Tooltip("Fase:N"),
             alt.Tooltip("sum(Qtd):Q", title="Quantidade"),
         ],
-        order=alt.Order("fase_ord:Q", sort="ascending"),         # controla a pilha (E->D)
+        order=alt.Order("fase_ord:Q", sort="ascending"),
     )
 )
 st.altair_chart(chart_stack.properties(height=350), use_container_width=True)
@@ -469,8 +477,8 @@ chart_conv = alt.Chart(conv_melt).mark_bar().encode(
 )
 st.altair_chart(chart_conv.properties(height=280), use_container_width=True)
 
-# --- Gráfico 4: Vendedoras (Prospecção Ativa) — barras agrupadas
-st.markdown("### 👤 Vendedoras (Prospecção Ativa)")
+# --- Gráfico 4: Vendedoras — barras agrupadas (respeita filtros de canal)
+st.markdown("### 👤 Vendedoras (respeita filtros de canal)")
 base_v = prospec_resumo_df[prospec_resumo_df["Vendedora"] != "TOTAL"][["Vendedora", "Leads Gerados", "Reuniões Agendadas", "Vendas"]]
 chart_v = alt.Chart(base_v).transform_fold(
     ["Leads Gerados", "Reuniões Agendadas", "Vendas"], as_=["Métrica", "Valor"]
@@ -482,7 +490,7 @@ chart_v = alt.Chart(base_v).transform_fold(
 )
 st.altair_chart(chart_v.properties(height=300), use_container_width=True)
 
-# --- Gráfico 5: Funil detalhado por Vendedora (eixo horizontal em quantidade)
+# --- Gráfico 5: Funil detalhado por Vendedora (quantidade; respeita filtros de canal)
 st.markdown("### 📊 Funil detalhado por Vendedora")
 if not prospec_funil_df.empty:
     pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].copy()
@@ -505,7 +513,6 @@ if not prospec_funil_df.empty:
     melted_v = pf_plot.melt(
         id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd"
     )
-    # índice para empilhamento na ordem desejada
     phase_rank = {name: i for i, name in enumerate(phase_order)}
     melted_v["fase_ord"] = melted_v["Fase"].map(phase_rank).astype("int64")
 
@@ -538,13 +545,13 @@ if not prospec_funil_df.empty:
 st.markdown("### 📄 Tabelas")
 with st.expander("Dados Limpos", expanded=False):
     st.dataframe(df[["Fase", "Responsável", "Nome do Negócio", "Fonte", "Criado", "Motivo de perda"]])
-with st.expander("Funil Comercial do Período", expanded=True):
+with st.expander("Funil Comercial do Período", expanded=False):
     st.dataframe(funil_df)
 with st.expander("Taxas de Conversão por Canal", expanded=False):
     st.dataframe(conv_df)
-with st.expander("Prospecção Ativa - Resumo por Vendedora", expanded=False):
+with st.expander("Resumo por Vendedora", expanded=False):
     st.dataframe(prospec_resumo_df)
-with st.expander("Funil Detalhado por Vendedora (Prospecção Ativa)", expanded=False):
+with st.expander("Funil Detalhado por Vendedora (base filtrada)", expanded=False):
     st.dataframe(prospec_funil_df)
 with st.expander("Resumo por Vendedora × Origem", expanded=False):
     st.dataframe(vend_origem_df)
@@ -559,8 +566,8 @@ with pd.ExcelWriter(buffer_xlsx, engine="xlsxwriter") as writer:
     )
     funil_df.to_excel(writer, sheet_name="Funil_Comercial", index=False)
     conv_df.to_excel(writer, sheet_name="Conversao_Canal", index=False)
-    prospec_resumo_df.to_excel(writer, sheet_name="Prospec_Resumo", index=False)
-    prospec_funil_df.to_excel(writer, sheet_name="Prospec_Funil", index=False)
+    prospec_resumo_df.to_excel(writer, sheet_name="Vendedora_Resumo", index=False)
+    prospec_funil_df.to_excel(writer, sheet_name="Vendedora_Funil", index=False)
     vend_origem_df.to_excel(writer, sheet_name="Vendedora_Origem", index=False)
 
 st.download_button(
@@ -571,11 +578,11 @@ st.download_button(
 )
 
 # =========================================================
-# Exportar PDF (matplotlib) — mantido como antes
+# Exportar PDF
 # =========================================================
 pdf_bytes = BytesIO()
 with PdfPages(pdf_bytes) as pdf:
-    # 0) Capa / Sumário
+    # Capa
     fig = plt.figure(figsize=(10, 6))
     plt.axis("off")
     periodo_txt = f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}"
@@ -589,7 +596,7 @@ with PdfPages(pdf_bytes) as pdf:
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
-    # 1) Leads por canal
+    # Leads por canal
     base_plot = funil_df[funil_df["Canal de Origem"] != "TOTAL"][["Canal de Origem", "Leads Recebidos"]]
     fig = plt.figure(figsize=(10, 6))
     plt.barh(base_plot["Canal de Origem"], base_plot["Leads Recebidos"])
@@ -599,7 +606,7 @@ with PdfPages(pdf_bytes) as pdf:
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
-    # 2) Conversões por canal
+    # Conversões por canal
     fig = plt.figure(figsize=(10, 6))
     conv_plot = conv_df[conv_df["Canal de Origem"] != "TOTAL"].set_index("Canal de Origem")
     conv_plot[["% Reuniões/Leads", "% Vendas/Leads", "% Vendas/Reuniões"]].plot(kind="barh", ax=plt.gca())
@@ -609,16 +616,16 @@ with PdfPages(pdf_bytes) as pdf:
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
-    # 3) Prospecção ativa por vendedora
+    # Resumo vendedora
     fig = plt.figure(figsize=(10, 6))
     pv = prospec_resumo_df[prospec_resumo_df["Vendedora"] != "TOTAL"].set_index("Vendedora")
     pv[["Leads Gerados", "Reuniões Agendadas", "Vendas"]].plot(kind="barh", ax=plt.gca())
-    plt.title("Prospecção Ativa — Leads/Reuniões/Vendas por Vendedora")
+    plt.title("Leads/Reuniões/Vendas por Vendedora (base filtrada)")
     plt.tight_layout()
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
-    # 4) Funil detalhado por vendedora (agrupado, matplotlib)
+    # Funil vendedora (tabela -> barras simples)
     if not prospec_funil_df.empty:
         fig = plt.figure(figsize=(11, 6))
         fases_plot_pdf = [
@@ -628,7 +635,7 @@ with PdfPages(pdf_bytes) as pdf:
         pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"] != "TOTAL"].set_index("Vendedora")[fases_plot_pdf]
         pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())
         plt.xticks(rotation=45, ha="right")
-        plt.title("Funil Detalhado por Vendedora (Prospecção Ativa)")
+        plt.title("Funil por Vendedora (base filtrada)")
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
