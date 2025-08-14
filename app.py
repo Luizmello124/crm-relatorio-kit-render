@@ -1,386 +1,587 @@
-# app.py
-# ---------------------------------------------
-# CRM Relatório KIT — Dashboard Streamlit
-# ---------------------------------------------
+# app.py — Relatório CRM — v10
+# Novidades v10:
+# - Gráfico "Leads criados por dia": barras lado-a-lado para Vendedora/Canal (x ordinal + xOffset)
+# - Filtros com checkboxes (Todos / Limpar / Inverter) para melhor UX
+# - Mantém: Base CLT/SEC, ordem/cores de fases, PDF/Excel, atalhos e MM opcional
 
-import io
-from datetime import datetime, timedelta
-
-import numpy as np
-import pandas as pd
-import plotly.express as px
 import streamlit as st
+import pandas as pd
+import unicodedata
+import altair as alt
+from io import BytesIO
+from datetime import datetime, date
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
-# ---------- Config visual ----------
-st.set_page_config(
-    page_title="Gerador de Relatório CRM",
-    page_icon="📊",
-    layout="wide",
+st.set_page_config(page_title="Relatório CRM — v10", layout="wide")
+st.title("Gerador de Relatório CRM — v10")
+st.caption("Envie o CSV do CRM (separador ';' ou ','). O app detecta separador e encoding automaticamente.")
+
+# ========================= Helpers =========================
+def strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+def norm_phase(s):
+    if pd.isna(s):
+        return ""
+    s = str(s).strip().lower()
+    s = strip_accents(s)
+    s = (s.replace("r$", "")
+           .replace("  ", " ").replace("–", "-").replace("—", "-")
+           .replace(" -", "").replace("-", " "))
+    return " ".join(s.split())
+
+def norm_text(x):
+    return strip_accents(str(x).strip().lower()) if pd.notna(x) else ""
+
+def pct(a, b):
+    return round((a / b * 100) if b else 0, 2)
+
+def count_set(series_norm, allowed_set):
+    return series_norm.isin(allowed_set).sum()
+    
+def full_dates(start, end):
+    """Retorna DataFrame com todas as datas entre start e end como coluna 'Dia' (datetime)."""
+    rng = pd.date_range(pd.to_datetime(start), pd.to_datetime(end), freq="D")
+    return pd.DataFrame({"Dia": pd.to_datetime(rng)})
+
+def read_crm_csv(uploaded_file) -> pd.DataFrame:
+    raw = uploaded_file.getvalue()
+    enc_used = "utf-8"
+    for enc in ("utf-8", "latin1"):
+        try:
+            _ = raw.decode(enc, errors="strict")
+            enc_used = enc
+            break
+        except Exception:
+            continue
+    text = raw.decode(enc_used, errors="ignore")
+    sample = "\n".join(text.splitlines()[:20])
+    delim = ";" if sample.count(";") >= sample.count(",") else ","
+    return pd.read_csv(
+        BytesIO(raw), sep=delim, engine="python", encoding=enc_used,
+        on_bad_lines="skip", dtype_backend="numpy_nullable",
+    )
+
+# ======= Filtro com Checkboxes — melhor UX =======
+def checkbox_grid(label, options, key, default_all=True, columns=2):
+    st.sidebar.markdown(f"**{label}**")
+    if key not in st.session_state:
+        st.session_state[key] = set(options if default_all else [])
+    b1, b2, b3 = st.sidebar.columns(3)
+    if b1.button("Todos", key=f"all_{key}"):
+        st.session_state[key] = set(options)
+    if b2.button("Limpar", key=f"clr_{key}"):
+        st.session_state[key] = set()
+    if b3.button("Inverter", key=f"inv_{key}"):
+        st.session_state[key] = set([o for o in options if o not in st.session_state[key]])
+
+    cols = st.sidebar.columns(columns)
+    for i, opt in enumerate(options):
+        with cols[i % columns]:
+            checked = opt in st.session_state[key]
+            new_val = st.checkbox(opt, value=checked, key=f"cb_{key}_{i}")
+            if new_val:
+                st.session_state[key].add(opt)
+            else:
+                st.session_state[key].discard(opt)
+    return list(st.session_state[key])
+
+# ========================= Upload =========================
+up = st.file_uploader("CSV do CRM", type=["csv"])
+if up is None:
+    st.info("⬆️ Envie um CSV para começar.")
+    st.stop()
+
+try:
+    df_raw = read_crm_csv(up)
+except Exception as e:
+    st.error(f"Não consegui ler o CSV. Detalhe: {e}")
+    st.stop()
+
+expected = {
+    "Fase": ["Fase"],
+    "Responsável": ["Responsável", "Responsavel"],
+    "Nome do Negócio": ["Nome do Negócio", "Nome do negocio", "Nome do negócio"],
+    "Fonte": ["Fonte"],
+    "Criado": ["Criado", "Data de criação", "Data de criacao"],
+    "Motivo de perda": ["Motivo de perda.1", "Motivo de perda_1", "Motivo de perda 1"],
+}
+colmap = {}
+for wanted, cands in expected.items():
+    for c in cands:
+        if c in df_raw.columns:
+            colmap[wanted] = c
+            break
+missing = [k for k in expected if k not in colmap]
+if missing:
+    st.error(f"Faltam colunas no CSV: {missing}\nColunas recebidas: {list(df_raw.columns)}")
+    st.stop()
+
+df = df_raw[[colmap[k] for k in expected]].copy()
+df.columns = list(expected.keys())
+df["Criado"] = pd.to_datetime(df["Criado"], errors="coerce", dayfirst=True)
+df["_fase_norm"] = df["Fase"].apply(norm_phase)
+
+# ===== Mapeamento de Fonte -> Canal (inclui Base CLT/SEC) =====
+map_dict = {
+    "site": "Google Ads",
+    "face - metaads": "Trafego Pago - Face",
+    "facebook- meta ads": "Trafego Pago - Face",
+    "facebook - meta ads": "Trafego Pago - Face",
+    "facebook- metaads": "Trafego Pago - Face",
+    "facebook meta ads": "Trafego Pago - Face",
+    "insta - metaads": "Trafego Pago - Insta",
+    "instagram - meta ads": "Trafego Pago - Insta",
+    "instagram- meta ads": "Trafego Pago - Insta",
+    "instagram meta ads": "Trafego Pago - Insta",
+    "lp": "Impulsionamento Instagram",
+    "prospeccao ativa": "Prospecção Ativa",
+    "prospecção ativa": "Prospecção Ativa",
+    "whatsapp": "Inbound",
+    "indicacao": "Indicação",
+    "indicação": "Indicação",
+    "base clt/sec": "Base CLT/SEC",
+    "base clt sec": "Base CLT/SEC",
+}
+df["Canal de Origem"] = df["Fonte"].apply(lambda x: map_dict.get(norm_text(x), "Outros"))
+
+canal_ordem = [
+    "Google Ads","Trafego Pago - Face","Trafego Pago - Insta",
+    "Impulsionamento Instagram","Prospecção Ativa","Inbound",
+    "Indicação","Base CLT/SEC","Outros"
+]
+
+# ========================= Filtros =========================
+st.sidebar.header("Filtros")
+
+min_d = pd.to_datetime(df["Criado"].min()).date() if df["Criado"].notna().any() else date.today()
+max_d = pd.to_datetime(df["Criado"].max()).date() if df["Criado"].notna().any() else date.today()
+d_ini, d_fim = st.sidebar.date_input("Período (Criado)", value=(min_d, max_d))
+if isinstance(d_ini, tuple):
+    d_ini, d_fim = d_ini
+
+vendedoras = sorted(df["Responsável"].dropna().unique().tolist())
+sel_vendedoras = checkbox_grid("Vendedoras", vendedoras, key="vend_grid", default_all=True, columns=1)
+
+canais = [c for c in canal_ordem if c in df["Canal de Origem"].unique()] + sorted(
+    [c for c in df["Canal de Origem"].unique() if c not in canal_ordem]
+)
+c1, c2, c3 = st.sidebar.columns(3)
+if c1.button("Somente Mkt"):
+    st.session_state["canal_grid"] = set([c for c in canais if c in ["Google Ads","Trafego Pago - Face","Trafego Pago - Insta","Impulsionamento Instagram","Inbound"]])
+if c2.button("Somente Prospecção"):
+    st.session_state["canal_grid"] = set(["Prospecção Ativa"])
+if c3.button("Exceto Outros"):
+    st.session_state["canal_grid"] = set([c for c in canais if c != "Outros"])
+
+sel_canais = checkbox_grid("Canais de Origem", canais, key="canal_grid", default_all=True, columns=1)
+
+only_prospec = st.sidebar.checkbox("Focar apenas em Prospecção Ativa (gráficos por vendedora)", value=False)
+
+mask = pd.Series(True, index=df.index)
+if df["Criado"].notna().any():
+    mask &= df["Criado"].dt.date.between(d_ini, d_fim)
+if sel_vendedoras:
+    mask &= df["Responsável"].isin(sel_vendedoras)
+if sel_canais:
+    mask &= df["Canal de Origem"].isin(sel_canais)
+df = df[mask].copy()
+base_vendedora_df = df if not only_prospec else df[df["Canal de Origem"] == "Prospecção Ativa"]
+
+# ===== Labels / conjuntos de fases =====
+label_perdidos = {
+    "Sem retorno": {"sem retorno"},
+    "Sem Interesse": {"sem interesse"},
+    "Fora do Perfil": {"fora do perfil"},
+    "Outros/Perdido": {"outros / perdido","outros/perdido","outros perdido"},
+    "Abaixo de R$500K": {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"},
+}
+labels_reuniao_agendando = {"agendando reuniao","agendamento de reuniao"}
+labels_reuniao_agendada = {"reuniao agendada","reunioes agendadas"}
+labels_reuniao_all = labels_reuniao_agendando | labels_reuniao_agendada
+labels_proposta = {"proposta e negociacao"}
+labels_venda = {"negocio fechado","negocios fechados"}
+
+# ========================= Tabelas por canal =========================
+funil_rows = []
+for canal in canal_ordem:
+    g = df[df["Canal de Origem"] == canal]
+    total = len(g)
+    row = {"Canal de Origem": canal, "Leads Recebidos": total}
+    for colname, variants in label_perdidos.items():
+        row[colname] = count_set(g["_fase_norm"], variants)
+    row["Agendando Reunião"]   = count_set(g["_fase_norm"], labels_reuniao_agendando)
+    row["Reuniões Agendadas"]  = count_set(g["_fase_norm"], labels_reuniao_agendada)
+    row["Proposta e Negociação"]= count_set(g["_fase_norm"], labels_proposta)
+    row["Negócio Fechado"]     = count_set(g["_fase_norm"], labels_venda)
+    anteriores = sum(v for k, v in row.items() if k not in {"Canal de Origem","Leads Recebidos"})
+    row["Em Atendimento"]      = max(total - anteriores, 0)
+    funil_rows.append(row)
+funil_df = pd.DataFrame(funil_rows)
+expected_cols = ["Canal de Origem","Leads Recebidos","Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
+                 "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"]
+for c in expected_cols:
+    if c not in funil_df.columns: funil_df[c] = 0
+funil_df = funil_df[expected_cols]
+total_row = {"Canal de Origem":"TOTAL"}
+for c in expected_cols[1:]:
+    total_row[c] = funil_df[c].sum()
+funil_df = pd.concat([funil_df, pd.DataFrame([total_row])], ignore_index=True)
+
+conv_rows = []
+for canal in canal_ordem:
+    g = df[df["Canal de Origem"] == canal]
+    leads = len(g); reun = count_set(g["_fase_norm"], labels_reuniao_all); vend = count_set(g["_fase_norm"], labels_venda)
+    conv_rows.append({"Canal de Origem": canal,
+                      "% Reuniões/Leads": pct(reun, leads),
+                      "% Vendas/Leads": pct(vend, leads),
+                      "% Vendas/Reuniões": pct(vend, reun)})
+leads_tot = len(df); reun_tot = count_set(df["_fase_norm"], labels_reuniao_all); vend_tot = count_set(df["_fase_norm"], labels_venda)
+conv_rows.append({"Canal de Origem":"TOTAL",
+                  "% Reuniões/Leads": pct(reun_tot, leads_tot),
+                  "% Vendas/Leads": pct(vend_tot, leads_tot),
+                  "% Vendas/Reuniões": pct(vend_tot, reun_tot)})
+conv_df = pd.DataFrame(conv_rows)
+
+# ========================= Por vendedora (respeita filtros) =========================
+todas_vendedoras = sorted(base_vendedora_df["Responsável"].dropna().unique().tolist())
+
+prospec = base_vendedora_df
+prospec_rows = []
+for resp in todas_vendedoras:
+    g = prospec[prospec["Responsável"] == resp]
+    leads = len(g); reun = count_set(g["_fase_norm"], labels_reuniao_all); vend = count_set(g["_fase_norm"], labels_venda)
+    prospec_rows.append({"Vendedora": resp, "Leads Gerados": leads, "Reuniões Agendadas": reun, "Vendas": vend,
+                         "Conversão Reunião (%)": pct(reun, leads), "Conversão Venda (%)": pct(vend, leads)})
+prospec_rows.append({"Vendedora":"TOTAL","Leads Gerados":len(prospec),
+                     "Reuniões Agendadas":count_set(prospec["_fase_norm"], labels_reuniao_all),
+                     "Vendas":count_set(prospec["_fase_norm"], labels_venda),
+                     "Conversão Reunião (%)": pct(count_set(prospec["_fase_norm"], labels_reuniao_all), len(prospec)) if len(prospec) else 0,
+                     "Conversão Venda (%)": pct(count_set(prospec["_fase_norm"], labels_venda), len(prospec)) if len(prospec) else 0})
+prospec_resumo_df = pd.DataFrame(prospec_rows)
+
+prospec_funil_rows = []
+for resp in todas_vendedoras:
+    g = base_vendedora_df[base_vendedora_df["Responsável"] == resp]
+    row = {"Vendedora": resp, "Leads Gerados (base filtrada)": len(g)}
+    row["Sem retorno"] = count_set(g["_fase_norm"], {"sem retorno"})
+    row["Sem Interesse"] = count_set(g["_fase_norm"], {"sem interesse"})
+    row["Fora do Perfil"] = count_set(g["_fase_norm"], {"fora do perfil"})
+    row["Outros/Perdido"] = count_set(g["_fase_norm"], {"outros / perdido","outros/perdido","outros perdido"})
+    row["Abaixo de R$500K"] = count_set(g["_fase_norm"], {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"})
+    row["Agendando Reunião"] = count_set(g["_fase_norm"], {"agendando reuniao","agendamento de reuniao"})
+    row["Reuniões Agendadas"] = count_set(g["_fase_norm"], {"reuniao agendada","reunioes agendadas"})
+    row["Proposta e Negociação"] = count_set(g["_fase_norm"], {"proposta e negociacao"})
+    row["Negócio Fechado"] = count_set(g["_fase_norm"], {"negocio fechado","negocios fechados"})
+    anteriores = sum(row[k] for k in ["Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
+                                      "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado"])
+    row["Em Atendimento"] = max(row["Leads Gerados (base filtrada)"] - anteriores, 0)
+    prospec_funil_rows.append(row)
+prospec_funil_df = pd.DataFrame(prospec_funil_rows)
+if not prospec_funil_df.empty:
+    tot = {"Vendedora":"TOTAL"}
+    for c in prospec_funil_df.columns:
+        if c!="Vendedora": tot[c]=prospec_funil_df[c].sum()
+    prospec_funil_df = pd.concat([prospec_funil_df, pd.DataFrame([tot])], ignore_index=True)
+
+vend_origem_rows = []
+for resp in sorted(df["Responsável"].dropna().unique()):
+    g = df[df["Responsável"] == resp]
+    for origem, m in {
+        "Prospecção Ativa": g["Canal de Origem"].eq("Prospecção Ativa"),
+        "Leads de Mkt": g["Canal de Origem"].isin(["Google Ads","Trafego Pago - Face","Trafego Pago - Insta","Impulsionamento Instagram","Inbound"]),
+    }.items():
+        sub = g[m]; leads=len(sub); reun=count_set(sub["_fase_norm"], labels_reuniao_all); vend=count_set(sub["_fase_norm"], labels_venda)
+        vend_origem_rows.append({"Vendedora":resp,"Origem do Lead":origem,"Leads Trabalhados":leads,
+                                 "Reuniões Agendadas":reun,"Vendas":vend,
+                                 "Conversão Reunião (%)":pct(reun, leads),"Conversão Venda (%)":pct(vend, leads)})
+vend_origem_df = pd.DataFrame(vend_origem_rows)
+
+# ========================= Visão geral =========================
+st.markdown("### 📊 Visão Geral (após filtros)")
+m1, m2, m3 = st.columns(3)
+with m1: st.metric("Leads (Total)", len(df))
+with m2: st.metric("Reuniões (Total)", int(count_set(df["_fase_norm"], labels_reuniao_all)))
+with m3: st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
+
+# Paleta e ordem fixa das fases
+phase_order = ["Em Atendimento","Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado",
+               "Abaixo de R$500K","Fora do Perfil","Sem Interesse","Sem retorno","Outros/Perdido"]
+phase_colors = ["#fbbf24","#86efac","#4ade80","#22c55e","#16a34a","#fca5a5","#f87171","#dc2626","#991b1b","#ef4444"]
+phase_rank = {n:i for i,n in enumerate(phase_order)}
+
+# Leads por canal
+st.markdown("### 📈 Canais — Leads por Canal")
+base = funil_df[funil_df["Canal de Origem"]!="TOTAL"][["Canal de Origem","Leads Recebidos"]]
+st.altair_chart(
+    alt.Chart(base).mark_bar().encode(
+        x="Leads Recebidos:Q", y=alt.Y("Canal de Origem:N", sort="-x")),
+    use_container_width=True
 )
 
-# Paleta de cores para fases (ordem fixa que o cliente pediu)
-FASERDER = [
-    "Em Atendimento",
-    "Agendando Reunião",
-    "Reuniões Agendadas",
-    "Proposta e Negociação",
-    "Negócio Fechado",
-    "Abaixo de R$500K",
-    "Fora do Perfil",
-    "Sem Interesse",
-    "Sem retorno",
-    "Outros/Perdido",
-]
-FASE_COLORS = {
-    "Em Atendimento":      "#f0c419",  # amarelo
-    "Agendando Reunião":   "#4caf50",  # verde
-    "Reuniões Agendadas":  "#2e7d32",  # verde escuro
-    "Proposta e Negociação":"#81c784", # verde claro
-    "Negócio Fechado":     "#1b5e20",  # verde bem escuro
-    "Abaixo de R$500K":    "#ef9a9a",  # vermelho claro
-    "Fora do Perfil":      "#e57373",
-    "Sem Interesse":       "#ef5350",
-    "Sem retorno":         "#d32f2f",
-    "Outros/Perdido":      "#b71c1c",
-}
+# Fases x Canal (normalizado, tooltip=Qtd)
+fases_cols = ["Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
+              "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"]
+melt = funil_df[funil_df["Canal de Origem"]!="TOTAL"].melt(
+    id_vars=["Canal de Origem"], value_vars=fases_cols, var_name="Fase", value_name="Qtd")
+melt["fase_ord"] = melt["Fase"].map(phase_rank).astype("int64")
+st.markdown("### 📊 Distribuição de Fases por Canal (proporção)")
+st.altair_chart(
+    alt.Chart(melt).mark_bar().encode(
+        x=alt.X("sum(Qtd):Q", stack="normalize", title="Proporção"),
+        y=alt.Y("Canal de Origem:N", sort="-x"),
+        color=alt.Color("Fase:N", sort=phase_order, scale=alt.Scale(domain=phase_order, range=phase_colors)),
+        tooltip=[alt.Tooltip("Canal de Origem:N"), alt.Tooltip("Fase:N"), alt.Tooltip("sum(Qtd):Q", title="Quantidade")],
+        order=alt.Order("fase_ord:Q", sort="ascending"),
+    ).properties(height=340),
+    use_container_width=True
+)
 
-# ---------- Funções utilitárias ----------
-def norm(s: str) -> str:
-    return s.strip().lower()
+# Conversões por canal
+conv_melt = conv_df[conv_df["Canal de Origem"]!="TOTAL"].melt(
+    id_vars=["Canal de Origem"], var_name="Métrica", value_name="Valor")
+st.markdown("### 📈 Conversões por Canal")
+st.altair_chart(
+    alt.Chart(conv_melt).mark_bar().encode(
+        x=alt.X("Valor:Q", title="%"),
+        y=alt.Y("Canal de Origem:N", sort="-x"),
+        color="Métrica:N",
+        tooltip=[alt.Tooltip("Canal de Origem:N"),alt.Tooltip("Métrica:N"),alt.Tooltip("Valor:Q", title="%")],
+    ).properties(height=280),
+    use_container_width=True
+)
 
-def try_read_csv(file):
-    # Lê CSV de forma robusta: detecta separador, tenta diferentes encodings
-    tries = [
-        dict(sep=None, engine="python", encoding="utf-8"),
-        dict(sep=None, engine="python", encoding="latin-1"),
-        dict(sep=None, engine="python", encoding_errors="ignore"),
-    ]
-    last_err = None
-    for kw in tries:
-        try:
-            return pd.read_csv(file, **kw)
-        except Exception as e:
-            last_err = e
-    raise last_err
+# Vendedoras (respeita filtros)
+st.markdown("### 👤 Vendedoras (respeita filtros de canal)")
+base_v = prospec_resumo_df[prospec_resumo_df["Vendedora"]!="TOTAL"][["Vendedora","Leads Gerados","Reuniões Agendadas","Vendas"]]
+st.altair_chart(
+    alt.Chart(base_v).transform_fold(
+        ["Leads Gerados","Reuniões Agendadas","Vendas"], as_=["Métrica","Valor"]
+    ).mark_bar().encode(
+        x="Valor:Q", y=alt.Y("Vendedora:N", sort="-x"), color="Métrica:N",
+        tooltip=[alt.Tooltip("Vendedora:N"), alt.Tooltip("Métrica:N"), alt.Tooltip("Valor:Q")]
+    ).properties(height=300),
+    use_container_width=True
+)
 
-def montar_mapa_canais(serie_fonte: pd.Series) -> pd.Series:
-    val = serie_fonte.astype(str).str.strip()
-
-    # Normaliza variações
-    m = pd.Series("Outros", index=val.index)
-
-    m[val.str.fullmatch(r"(?i)site")] = "Google Ads"
-
-    # MetaAds variações
-    m[val.str.contains(r"(?i)facebook.*meta\s*ads|face.*meta", na=False)] = "Trafego Pago - Face"
-    m[val.str.contains(r"(?i)instagram.*meta\s*ads|insta.*meta", na=False)] = "Trafego Pago - Insta"
-
-    m[val.str.fullmatch(r"(?i)lp")] = "Impulsionamento Instagram"
-    m[val.str.contains(r"(?i)whats", na=False)] = "Inbound"
-
-    m[val.str.contains(r"(?i)prospec", na=False)] = "Prospecção Ativa"
-    m[val.str.contains(r"(?i)indica", na=False)] = "Indicação"
-
-    # Novo canal solicitado
-    m[val.str.contains(r"(?i)base\s*clt\s*\/?\s*sec|base\s*clt|base\s*sec", na=False)] = "Base CLT/SEC"
-
-    return m
-
-def padronizar_fase(s: pd.Series) -> pd.Series:
-    v = s.astype(str).str.strip().str.lower()
-    out = pd.Series("Em Atendimento", index=v.index)
-
-    def any_of(*subs):
-        regex = "|".join([rf"(?i){x}" for x in subs])
-        return v.str.contains(regex, na=False)
-
-    # Mapeamentos
-    out[any_of("agendando", "agendamento")] = "Agendando Reunião"
-    out[any_of("reuni", "reunião", "reuniao")] = "Reuniões Agendadas"
-    out[any_of("proposta", "negocia")] = "Proposta e Negociação"
-    out[any_of("fechado", "ganho", "ganha")] = "Negócio Fechado"
-
-    out[any_of("abaixo", "500k", "500 k")] = "Abaixo de R$500K"
-    out[any_of("fora do perfil", "fora perfil")] = "Fora do Perfil"
-    out[any_of("sem retorno", "nao respondeu", "não respondeu")] = "Sem retorno"
-    out[any_of("sem interesse")] = "Sem Interesse"
-    out[any_of("perdid", "perda", "outros")] = "Outros/Perdido"
-
-    return pd.Categorical(out, categories=FASERDER, ordered=True)
-
-def add_badge(title: str, value: int):
-    st.markdown(
-        f"""
-        <div style="display:flex;flex-direction:column;gap:4px;padding:16px 18px;border-radius:12px;background:#121212;border:1px solid #2c2c2c;min-width:160px;">
-          <div style="opacity:.8;font-size:14px;">{title}</div>
-          <div style="font-size:40px;font-weight:700;line-height:1;">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+# Funil detalhado por vendedora (quantidade)
+st.markdown("### 📊 Funil detalhado por Vendedora")
+if not prospec_funil_df.empty:
+    pf = prospec_funil_df[prospec_funil_df["Vendedora"]!="TOTAL"].copy()
+    fases_plot = phase_order  # já na ordem desejada
+    for c in fases_plot:
+        if c not in pf.columns: pf[c]=0
+    melted_v = pf.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
+    melted_v["fase_ord"] = melted_v["Fase"].map(phase_rank).astype("int64")
+    st.altair_chart(
+        alt.Chart(melted_v).mark_bar().encode(
+            x=alt.X("sum(Qtd):Q", stack="zero", title="Quantidade"),
+            y=alt.Y("Vendedora:N", sort="-x"),
+            color=alt.Color("Fase:N", sort=phase_order, scale=alt.Scale(domain=phase_order, range=phase_colors)),
+            tooltip=[alt.Tooltip("Vendedora:N"), alt.Tooltip("Fase:N"), alt.Tooltip("sum(Qtd):Q", title="Quantidade")],
+            order=alt.Order("fase_ord:Q", sort="ascending")
+        ).properties(height=320),
+        use_container_width=True
     )
 
-def bar_horz_count(df, by, title):
-    g = df.groupby(by).size().reset_index(name="Leads")
-    g = g.sort_values("Leads", ascending=True)
-    fig = px.bar(
-        g, x="Leads", y=by, orientation="h",
-        title=title, text="Leads"
-    )
-    fig.update_traces(marker_color="#86c5ff", textposition="outside")
-    fig.update_layout(height=420, xaxis_title="Leads Recebidos", yaxis_title=None, margin=dict(l=10,r=10,b=10,t=50))
-    st.plotly_chart(fig, use_container_width=True)
+# ========================= Leads criados por dia — com dias zerados =========================
+st.markdown("### 📅 Leads criados por dia")
+detalhe = st.radio("Detalhar por", ["Total", "Vendedora", "Canal de Origem"], horizontal=True, key="detalhe_diario")
+show_mm = st.checkbox("Mostrar média móvel", value=True, key="mm_toggle")
+mm_window = st.slider("Janela da média móvel (dias)", 1, 14, 7, key="mm_diario", disabled=not show_mm)
 
-def stacked_by_phase(df, group_col, title):
-    # Garante todas as fases com 0
-    ct = (df
-          .assign(_fase=df["Fase"].astype("category").cat.add_categories([c for c in FASERDER if c not in df["Fase"].cat.categories]))
-          .groupby([group_col, "_fase"])
-          .size()
-          .reset_index(name="Qtd"))
-    ct.rename(columns={"_fase": "Fase"}, inplace=True)
+base_daily = df[df["Criado"].notna()].copy()
+if base_daily.empty:
+    st.info("Nenhum lead com data de criação válida no intervalo/seleção atual.")
+else:
+    base_daily["Dia"] = base_daily["Criado"].dt.floor("D")
+    # DataFrame com TODAS as datas do intervalo de filtros
+    all_days = full_dates(d_ini, d_fim)
 
-    # Ordena fase pela ordem fixa
-    ct["Fase"] = pd.Categorical(ct["Fase"], categories=FASERDER, ordered=True)
+    if detalhe == "Total":
+        g = base_daily.groupby("Dia").size().rename("Leads").reset_index()
+        # left-join com TODAS as datas e preencher zeros
+        g = all_days.merge(g, on="Dia", how="left").fillna({"Leads": 0})
+        g = g.sort_values("Dia")
+        if show_mm:
+            g["MM"] = g["Leads"].rolling(mm_window, min_periods=1).mean()
 
-    # Percentual por grupo
-    total = ct.groupby(group_col)["Qtd"].transform("sum").replace(0, 1)
-    ct["%"] = (ct["Qtd"] / total) * 100
-
-    fig = px.bar(
-        ct, y=group_col, x="%", color="Fase",
-        color_discrete_map=FASE_COLORS,
-        orientation="h", category_orders={"Fase": FASERDER},
-        title=title, hover_data={"Qtd": True, "%": ":.1f"}
-    )
-    # Mostra contagem no hover ao invés de %
-    fig.update_traces(hovertemplate="<b>%{y}</b><br>Fase: %{marker.color}<br>Qtd: %{customdata[0]}<extra></extra>")
-    fig.update_layout(barmode="stack", height=520, margin=dict(l=10,r=10,b=10,t=60))
-    st.plotly_chart(fig, use_container_width=True)
-
-def funil_vendedora(df, title):
-    ct = (df
-          .assign(Fase=df["Fase"].astype("category"))
-          .groupby(["Responsável", "Fase"])
-          .size()
-          .reset_index(name="Qtd"))
-    # Garante presença de todas as fases
-    ct["Fase"] = pd.Categorical(ct["Fase"], categories=FASERDER, ordered=True)
-    fig = px.bar(
-        ct, x="Qtd", y="Responsável", color="Fase", orientation="h",
-        color_discrete_map=FASE_COLORS, category_orders={"Fase": FASERDER},
-        title=title
-    )
-    fig.update_layout(barmode="stack", height=520, margin=dict(l=10,r=10,b=10,t=60))
-    st.plotly_chart(fig, use_container_width=True)
-
-def leads_por_dia(df, detail: str, show_ma: bool, ma_win: int):
-    df = df.copy()
-    df["Dia"] = df["Criado"].dt.floor("D")
-
-    if df["Dia"].isna().all():
-        st.info("Não há datas válidas em 'Criado' após filtros.")
-        return
-
-    min_d, max_d = df["Dia"].min(), df["Dia"].max()
-    full_idx = pd.date_range(min_d, max_d, freq="D")
-
-    if detail == "Total":
-        g = df.groupby("Dia").size().reindex(full_idx, fill_value=0)
-        fig = px.bar(
-            x=g.index, y=g.values, labels={"x":"Dia","y":"Leads"},
-            title="📅 Leads criados por dia"
+        bars = alt.Chart(g).mark_bar().encode(
+            x=alt.X("yearmonthdate(Dia):O", title="Dia", axis=alt.Axis(format="%d/%m")),
+            y=alt.Y("Leads:Q", title="Leads"),
+            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"), alt.Tooltip("Leads:Q", title="Leads")],
         )
-        if show_ma:
-            mav = pd.Series(g.values).rolling(ma_win, min_periods=1).mean().values
-            fig.add_scatter(x=g.index, y=mav, mode="lines+markers", name=f"Média móvel ({ma_win})")
-        st.plotly_chart(fig, use_container_width=True)
-
-    elif detail == "Vendedora":
-        g = df.groupby(["Dia", "Responsável"]).size().unstack(fill_value=0)
-        g = g.reindex(full_idx, fill_value=0)
-        fig = px.bar(
-            g.reset_index().melt(id_vars="index", var_name="Vendedora", value_name="Leads"),
-            x="index", y="Leads", color="Vendedora", barmode="group",
-            title="📅 Leads criados por dia — por Vendedora"
+        labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
+            x=alt.X("yearmonthdate(Dia):O"),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
         )
-        fig.update_xaxes(title="Dia")
-        if show_ma:
-            # Média móvel do total (soma das vendedoras)
-            total = g.sum(axis=1)
-            mav = total.rolling(ma_win, min_periods=1).mean()
-            fig.add_scatter(x=total.index, y=mav, mode="lines+markers", name=f"Média móvel ({ma_win})")
-        st.plotly_chart(fig, use_container_width=True)
+        chart = bars + labels
+        if show_mm:
+            line = alt.Chart(g).mark_line(strokeWidth=2, color="#10b981").encode(
+                x=alt.X("yearmonthdate(Dia):O"),
+                y=alt.Y("MM:Q", title="Média móvel"),
+                tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"), alt.Tooltip("MM:Q", title="Média móvel")],
+            )
+            chart = chart + line
+
+    elif detalhe == "Vendedora":
+        # categorias (já filtradas pelos checkboxes)
+        cats = sorted(base_daily["Responsável"].dropna().unique().tolist())
+        if not cats:
+            st.info("Nenhuma vendedora com dados no período/seleção atual.")
+            st.stop()
+
+        # cartesian product: todas as datas x todas as vendedoras
+        grid = all_days.assign(key=1)
+        cats_df = pd.DataFrame({"Responsável": cats}).assign(key=1)
+        cart = grid.merge(cats_df, on="key").drop(columns="key")
+
+        g = base_daily.groupby(["Dia", "Responsável"]).size().rename("Leads").reset_index()
+        # preencher datas ausentes com zero
+        g = cart.merge(g, on=["Dia", "Responsável"], how="left").fillna({"Leads": 0})
+        g = g.sort_values(["Responsável", "Dia"])
+
+        bars = alt.Chart(g).mark_bar().encode(
+            x=alt.X("yearmonthdate(Dia):O", title="Dia", axis=alt.Axis(format="%d/%m"),
+                    scale=alt.Scale(paddingInner=0.2, paddingOuter=0.05)),
+            xOffset=alt.XOffset("Responsável:N", sort=cats),
+            y=alt.Y("Leads:Q", title="Leads"),
+            color=alt.Color("Responsável:N", sort=cats, legend=alt.Legend(title="Vendedora")),
+            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"),
+                     alt.Tooltip("Responsável:N", title="Vendedora"),
+                     alt.Tooltip("Leads:Q")],
+        )
+        labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
+            x=alt.X("yearmonthdate(Dia):O"),
+            xOffset=alt.XOffset("Responsável:N", sort=cats),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
+        )
+        chart = bars + labels
+        if show_mm:
+            g["MM"] = g.groupby("Responsável")["Leads"].transform(
+                lambda s: s.rolling(mm_window, min_periods=1).mean()
+            )
+            lines = alt.Chart(g).mark_line(strokeWidth=2).encode(
+                x=alt.X("yearmonthdate(Dia):O"),
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.Color("Responsável:N", sort=cats, legend=None),
+            )
+            chart = chart + lines
 
     else:  # Canal de Origem
-        g = df.groupby(["Dia", "Canal de Origem"]).size().unstack(fill_value=0)
-        g = g.reindex(full_idx, fill_value=0)
-        fig = px.bar(
-            g.reset_index().melt(id_vars="index", var_name="Canal de Origem", value_name="Leads"),
-            x="index", y="Leads", color="Canal de Origem", barmode="group",
-            title="📅 Leads criados por dia — por Canal de Origem"
+        cats = sorted(base_daily["Canal de Origem"].dropna().unique().tolist())
+        if not cats:
+            st.info("Nenhum canal com dados no período/seleção atual.")
+            st.stop()
+
+        grid = all_days.assign(key=1)
+        cats_df = pd.DataFrame({"Canal de Origem": cats}).assign(key=1)
+        cart = grid.merge(cats_df, on="key").drop(columns="key")
+
+        g = base_daily.groupby(["Dia", "Canal de Origem"]).size().rename("Leads").reset_index()
+        g = cart.merge(g, on=["Dia", "Canal de Origem"], how="left").fillna({"Leads": 0})
+        g = g.sort_values(["Canal de Origem", "Dia"])
+
+        bars = alt.Chart(g).mark_bar().encode(
+            x=alt.X("yearmonthdate(Dia):O", title="Dia", axis=alt.Axis(format="%d/%m"),
+                    scale=alt.Scale(paddingInner=0.2, paddingOuter=0.05)),
+            xOffset=alt.XOffset("Canal de Origem:N", sort=cats),
+            y=alt.Y("Leads:Q", title="Leads"),
+            color=alt.Color("Canal de Origem:N", sort=cats, legend=alt.Legend(title="Canal")),
+            tooltip=[alt.Tooltip("yearmonthdate(Dia):O", title="Dia"),
+                     alt.Tooltip("Canal de Origem:N", title="Canal"),
+                     alt.Tooltip("Leads:Q")],
         )
-        fig.update_xaxes(title="Dia")
-        if show_ma:
-            total = g.sum(axis=1)
-            mav = total.rolling(ma_win, min_periods=1).mean()
-            fig.add_scatter(x=total.index, y=mav, mode="lines+markers", name=f"Média móvel ({ma_win})")
-        st.plotly_chart(fig, use_container_width=True)
-
-# ---------- UI - Upload ----------
-st.title("Gerador de Relatório CRM")
-uploaded = st.file_uploader("CSV do CRM", type=["csv"], help="Envie o CSV exportado do CRM")
-
-if not uploaded:
-    st.info("Envie um CSV para começar.")
-    st.stop()
-
-# ---------- Leitura robusta ----------
-base_df = try_read_csv(uploaded)
-
-# ---------- Escolha única de colunas (garante 1:1) ----------
-cols = list(base_df.columns)
-def find_cols(predicate):
-    return [c for c in cols if predicate(norm(c))]
-
-fase_cols     = find_cols(lambda cl: "fase" in cl)
-resp_cols     = find_cols(lambda cl: "respons" in cl)
-negocio_cols  = find_cols(lambda cl: "negócio" in cl or "negocio" in cl or "nome do negócio" in cl)
-fonte_cols    = find_cols(lambda cl: "fonte" in cl)
-criado_cols   = find_cols(lambda cl: "criado" in cl or "criação" in cl or "criacao" in cl or "data de criação" in cl)
-motivo_cols   = [c for c in cols if "motivo" in norm(c) and "perd" in norm(c)]
-
-col_map = {}
-if fase_cols:    col_map[fase_cols[0]]    = "Fase"
-if resp_cols:    col_map[resp_cols[0]]    = "Responsável"
-if negocio_cols: col_map[negocio_cols[0]] = "Nome do Negócio"
-if fonte_cols:   col_map[fonte_cols[0]]   = "Fonte"
-if criado_cols:  col_map[criado_cols[0]]  = "Criado"
-if motivo_cols:  col_map[motivo_cols[-1]] = "Motivo de perda"  # usa a "segunda"/última, como combinado
-
-if not col_map:
-    st.error("Não consegui identificar as colunas necessárias no CSV.")
-    st.stop()
-
-df = base_df[list(col_map.keys())].rename(columns=col_map).copy()
-
-# Datas
-if "Criado" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["Criado"]):
-    df["Criado"] = pd.to_datetime(df["Criado"].astype(str), errors="coerce")
-
-# Padronizações
-if "Fase" in df.columns:
-    df["Fase"] = padronizar_fase(df["Fase"])
-else:
-    df["Fase"] = pd.Categorical(["Em Atendimento"]*len(df), categories=FASERDER, ordered=True)
-
-df["Canal de Origem"] = montar_mapa_canais(df.get("Fonte", pd.Series(index=df.index, dtype=str)))
-
-# ---------- Filtros ----------
-with st.expander("Filtros", expanded=True):
-    # Período
-    min_d = df["Criado"].min() if "Criado" in df else pd.Timestamp.today() - pd.Timedelta(days=30)
-    max_d = df["Criado"].max() if "Criado" in df else pd.Timestamp.today()
-    if pd.isna(min_d) or pd.isna(max_d):
-        min_d = pd.Timestamp.today() - pd.Timedelta(days=30)
-        max_d = pd.Timestamp.today()
-    col1, col2 = st.columns([1,3])
-    with col1:
-        st.caption("Período (Criado)")
-    with col2:
-        date_range = st.date_input(
-            "", value=(min_d.date(), max_d.date()),
-            min_value=min_d.date(), max_value=max_d.date(), format="YYYY/MM/DD"
+        labels = alt.Chart(g).mark_text(dy=-4, size=11).encode(
+            x=alt.X("yearmonthdate(Dia):O"),
+            xOffset=alt.XOffset("Canal de Origem:N", sort=cats),
+            y="Leads:Q",
+            text="Leads:Q",
+            color=alt.value("#ffffff"),
         )
+        chart = bars + labels
+        if show_mm:
+            g["MM"] = g.groupby("Canal de Origem")["Leads"].transform(
+                lambda s: s.rolling(mm_window, min_periods=1).mean()
+            )
+            lines = alt.Chart(g).mark_line(strokeWidth=2).encode(
+                x=alt.X("yearmonthdate(Dia):O"),
+                y=alt.Y("MM:Q", title="Média móvel"),
+                color=alt.Color("Canal de Origem:N", sort=cats, legend=None),
+            )
+            chart = chart + lines
 
-    # Vendedoras
-    vend_list = sorted(df["Responsável"].dropna().astype(str).unique())
-    st.caption("Vendedoras")
-    c1, c2 = st.columns([6,1])
-    with c1:
-        vend_sel = st.multiselect(
-            "", vend_list, default=vend_list,
-            placeholder="Selecione as vendedoras"
-        )
-    with c2:
-        if st.button("Todos", use_container_width=True):
-            vend_sel = vend_list
-        if st.button("Limpar", use_container_width=True):
-            vend_sel = []
+    st.altair_chart(chart.properties(height=380), use_container_width=True)
 
-    # Canais
-    canal_list = [
-        "Google Ads", "Trafego Pago - Face", "Trafego Pago - Insta",
-        "Impulsionamento Instagram", "Prospecção Ativa", "Inbound",
-        "Indicação", "Base CLT/SEC", "Outros"
-    ]
-    st.caption("Canais de Origem")
-    c3, c4 = st.columns([6,1])
-    with c3:
-        canal_sel = st.multiselect("", canal_list, default=canal_list, placeholder="Selecione canais")
-    with c4:
-        if st.button("Todos  ", key="c_all", use_container_width=True):
-            canal_sel = canal_list
-        if st.button("Limpar ", key="c_clr", use_container_width=True):
-            canal_sel = []
+# ========================= Tabelas =========================
+st.markdown("### 📄 Tabelas")
+with st.expander("Dados Limpos", expanded=False):
+    st.dataframe(df[["Fase","Responsável","Nome do Negócio","Fonte","Criado","Motivo de perda"]])
+with st.expander("Funil Comercial do Período", expanded=False):
+    st.dataframe(funil_df)
+with st.expander("Taxas de Conversão por Canal", expanded=False):
+    st.dataframe(conv_df)
+with st.expander("Resumo por Vendedora", expanded=False):
+    st.dataframe(prospec_resumo_df)
+with st.expander("Funil Detalhado por Vendedora (base filtrada)", expanded=False):
+    st.dataframe(prospec_funil_df)
+with st.expander("Resumo por Vendedora × Origem", expanded=False):
+    st.dataframe(vend_origem_df)
 
-# Aplicar filtros
-df_filtrado = df.copy()
-if "Criado" in df_filtrado.columns and isinstance(date_range, tuple) and len(date_range) == 2:
-    ini, fim = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    df_filtrado = df_filtrado[df_filtrado["Criado"].between(ini, fim)]
+# ========================= Exportar Excel =========================
+buffer_xlsx = BytesIO()
+with pd.ExcelWriter(buffer_xlsx, engine="xlsxwriter") as writer:
+    df[["Fase","Responsável","Nome do Negócio","Fonte","Criado","Motivo de perda"]].to_excel(writer, "Dados_Limpos", index=False)
+    funil_df.to_excel(writer, "Funil_Comercial", index=False)
+    conv_df.to_excel(writer, "Conversao_Canal", index=False)
+    prospec_resumo_df.to_excel(writer, "Vendedora_Resumo", index=False)
+    prospec_funil_df.to_excel(writer, "Vendedora_Funil", index=False)
+    vend_origem_df.to_excel(writer, "Vendedora_Origem", index=False)
 
-if vend_sel:
-    df_filtrado = df_filtrado[df_filtrado["Responsável"].astype(str).isin(vend_sel)]
-else:
-    df_filtrado = df_filtrado.iloc[:0]  # vazio
+st.download_button("⬇️ Baixar Excel", buffer_xlsx.getvalue(),
+                   file_name=f"Relatorio_CRM_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-if canal_sel:
-    df_filtrado = df_filtrado[df_filtrado["Canal de Origem"].astype(str).isin(canal_sel)]
-else:
-    df_filtrado = df_filtrado.iloc[:0]
+# ========================= Exportar PDF =========================
+pdf_bytes = BytesIO()
+with PdfPages(pdf_bytes) as pdf:
+    fig = plt.figure(figsize=(10,6)); plt.axis("off")
+    periodo_txt = f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}"
+    resumo = f"Período: {periodo_txt}\nLeads: {len(df)} | Reuniões: {int(count_set(df['_fase_norm'], labels_reuniao_all))} | Vendas: {int(count_set(df['_fase_norm'], labels_venda))}"
+    plt.text(0.05, 0.75, "Relatório CRM", fontsize=24, weight="bold")
+    plt.text(0.05, 0.6, resumo, fontsize=14)
+    pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-st.markdown("### 📊 Visão Geral (após filtros)")
-k1, k2, k3, k4 = st.columns(4)
+    base_plot = funil_df[funil_df["Canal de Origem"]!="TOTAL"][["Canal de Origem","Leads Recebidos"]]
+    fig = plt.figure(figsize=(10,6))
+    plt.barh(base_plot["Canal de Origem"], base_plot["Leads Recebidos"])
+    plt.xlabel("Leads"); plt.title("Leads por Canal"); plt.tight_layout()
+    pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-total_leads = len(df_filtrado)
-total_reunioes = (df_filtrado["Fase"].isin(["Agendando Reunião", "Reuniões Agendadas"])).sum()
-total_proposta = (df_filtrado["Fase"] == "Proposta e Negociação").sum()
-total_vendas = (df_filtrado["Fase"] == "Negócio Fechado").sum()
+    fig = plt.figure(figsize=(10,6))
+    conv_plot = conv_df[conv_df["Canal de Origem"]!="TOTAL"].set_index("Canal de Origem")
+    conv_plot[["% Reuniões/Leads","% Vendas/Leads","% Vendas/Reuniões"]].plot(kind="barh", ax=plt.gca())
+    plt.xlabel("%"); plt.title("Conversões por Canal"); plt.tight_layout()
+    pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-with k1: add_badge("Leads (Total)", int(total_leads))
-with k2: add_badge("Reuniões (Total)", int(total_reunioes))
-with k3: add_badge("Em Proposta", int(total_proposta))
-with k4: add_badge("Vendas (Total)", int(total_vendas))
+    fig = plt.figure(figsize=(10,6))
+    pv = prospec_resumo_df[prospec_resumo_df["Vendedora"]!="TOTAL"].set_index("Vendedora")
+    pv[["Leads Gerados","Reuniões Agendadas","Vendas"]].plot(kind="barh", ax=plt.gca())
+    plt.title("Leads/Reuniões/Vendas por Vendedora (base filtrada)"); plt.tight_layout()
+    pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-st.divider()
+    if not prospec_funil_df.empty:
+        fig = plt.figure(figsize=(11,6))
+        pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"]!="TOTAL"].set_index("Vendedora")[phase_order]
+        pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())
+        plt.xticks(rotation=45, ha="right"); plt.title("Funil por Vendedora (base filtrada)"); plt.tight_layout()
+        pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
 
-# ---------- Gráficos ----------
-colA, = st.columns(1)
-with colA:
-    bar_horz_count(df_filtrado, "Canal de Origem", "📈 Canais — Leads por Canal")
-
-st.divider()
-
-# Detalhamento por canal (stacked por fase)
-stacked_by_phase(df_filtrado, "Canal de Origem", "📊 Detalhamento das Fases por Canal de Origem")
-
-st.divider()
-
-# Funil detalhado por vendedora (stacked, eixo horizontal em quantidade)
-funil_vendedora(df_filtrado, "🧑‍💼 Funil detalhado por Vendedora")
-
-st.divider()
-
-# Leads por dia (Total / Vendedora / Canal) com média móvel opcional
-st.markdown("### 📅 Leads criados por dia")
-copt1, copt2, copt3 = st.columns([2,3,3])
-with copt1:
-    detail = st.radio("Detalhar por", ["Total", "Vendedora", "Canal de Origem"], horizontal=True, index=1)
-with copt2:
-    show_ma = st.checkbox("Mostrar média móvel", value=False)
-with copt3:
-    ma_win = st.slider("Janela da média móvel (dias)", 2, 30, 7) if show_ma else 7
-
-leads_por_dia(df_filtrado, detail, show_ma, ma_win)
-
-st.caption("Dica: use os filtros acima para isolar vendedoras, canais e período.")
+st.download_button("⬇️ Baixar PDF", pdf_bytes.getvalue(),
+                   file_name=f"Relatorio_CRM_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                   mime="application/pdf")
