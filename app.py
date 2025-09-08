@@ -1,8 +1,9 @@
-# app.py — Relatório CRM — v10 (com novas fases)
-# Ajustes solicitados:
-# - "Em Proposta" = ("Proposta e Negociação" + "Follow up Proposta")
-# - Nova etapa "Finalizando Venda" (verde) entre "Proposta e Negociação" e "Negócio Fechado"
-# - Big Numbers: Leads | Reuniões | Em Proposta | Finalizando Venda | Vendas
+# app.py — Relatório CRM — v12
+# Atualizações v12:
+# - "Proposta e Negociação" também conta "Follow up Proposta"
+# - Nova fase "Finalizando Venda" (todas as subfases de fechamento)
+# - Visão Geral com 5 cards: Leads, Reuniões, Em Proposta, Finalizando Venda, Vendas
+# - Nova fase integrada aos gráficos e exportações mantendo UX da v10
 
 import streamlit as st
 import pandas as pd
@@ -13,8 +14,9 @@ from datetime import datetime, date
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-st.set_page_config(page_title="Relatório CRM — v10", layout="wide")
-st.title("Gerador de Relatório CRM — v10")
+# ======== CONFIG ========
+st.set_page_config(page_title="Relatório CRM — v12", layout="wide")
+st.title("Gerador de Relatório CRM — v12")
 st.caption("Envie o CSV do CRM (separador ';' ou ','). O app detecta separador e encoding automaticamente.")
 
 # ========================= Helpers =========================
@@ -39,9 +41,8 @@ def pct(a, b):
 
 def count_set(series_norm, allowed_set):
     return series_norm.isin(allowed_set).sum()
-    
+
 def full_dates(start, end):
-    """Retorna DataFrame com todas as datas entre start e end como coluna 'Dia' (datetime)."""
     rng = pd.date_range(pd.to_datetime(start), pd.to_datetime(end), freq="D")
     return pd.DataFrame({"Dia": pd.to_datetime(rng)})
 
@@ -190,7 +191,6 @@ df = df[mask].copy()
 base_vendedora_df = df if not only_prospec else df[df["Canal de Origem"] == "Prospecção Ativa"]
 
 # ===== Labels / conjuntos de fases =====
-# Tudo em minúsculo/sem acento, pois norm_phase normaliza
 label_perdidos = {
     "Sem retorno": {"sem retorno"},
     "Sem Interesse": {"sem interesse"},
@@ -198,13 +198,12 @@ label_perdidos = {
     "Outros/Perdido": {"outros / perdido","outros/perdido","outros perdido"},
     "Abaixo de R$500K": {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"},
 }
-# Reuniões
 labels_reuniao_agendando = {"agendando reuniao","agendamento de reuniao"}
-labels_reuniao_agendada  = {"reuniao agendada","reunioes agendadas"}
+labels_reuniao_agendada = {"reuniao agendada","reunioes agendadas"}
 labels_reuniao_all = labels_reuniao_agendando | labels_reuniao_agendada
-# Proposta (AJUSTE: incluir "Follow up Proposta")
-labels_proposta = {"proposta e negociacao", "follow up proposta"}
-# NOVA ETAPA: Finalizando Venda (todas essas fases contam aqui)
+
+# >>> Atualizações aqui
+labels_proposta = {"proposta e negociacao","follow up proposta"}
 labels_finalizando = {
     "aprovacao da proposta",
     "proposta aceita | gerar contrato",
@@ -218,7 +217,6 @@ labels_finalizando = {
     "aguardando pagamento",
     "pagamento recebido",
 }
-# Vendas (fechados)
 labels_venda = {"negocio fechado","negocios fechados"}
 
 # ========================= Tabelas por canal =========================
@@ -229,21 +227,20 @@ for canal in canal_ordem:
     row = {"Canal de Origem": canal, "Leads Recebidos": total}
     for colname, variants in label_perdidos.items():
         row[colname] = count_set(g["_fase_norm"], variants)
-    row["Agendando Reunião"]     = count_set(g["_fase_norm"], labels_reuniao_agendando)
-    row["Reuniões Agendadas"]    = count_set(g["_fase_norm"], labels_reunio_agendada)
-    row["Proposta e Negociação"] = count_set(g["_fase_norm"], labels_proposta)     # já soma Follow up
-    row["Finalizando Venda"]     = count_set(g["_fase_norm"], labels_finalizando)  # NOVO
-    row["Negócio Fechado"]       = count_set(g["_fase_norm"], labels_venda)
+    row["Agendando Reunião"]      = count_set(g["_fase_norm"], labels_reuniao_agendando)
+    row["Reuniões Agendadas"]     = count_set(g["_fase_norm"], labels_reuniao_agendada)
+    row["Proposta e Negociação"]  = count_set(g["_fase_norm"], labels_proposta)
+    row["Finalizando Venda"]      = count_set(g["_fase_norm"], labels_finalizando)   # NOVA
+    row["Negócio Fechado"]        = count_set(g["_fase_norm"], labels_venda)
     anteriores = sum(v for k, v in row.items() if k not in {"Canal de Origem","Leads Recebidos"})
-    row["Em Atendimento"]        = max(total - anteriores, 0)
+    row["Em Atendimento"]         = max(total - anteriores, 0)
     funil_rows.append(row)
+
 funil_df = pd.DataFrame(funil_rows)
 expected_cols = [
     "Canal de Origem","Leads Recebidos",
     "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
-    "Agendando Reunião","Reuniões Agendadas",
-    "Proposta e Negociação","Finalizando Venda","Negócio Fechado",
-    "Em Atendimento"
+    "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Finalizando Venda","Negócio Fechado","Em Atendimento"
 ]
 for c in expected_cols:
     if c not in funil_df.columns: funil_df[c] = 0
@@ -289,16 +286,16 @@ prospec_funil_rows = []
 for resp in todas_vendedoras:
     g = base_vendedora_df[base_vendedora_df["Responsável"] == resp]
     row = {"Vendedora": resp, "Leads Gerados (base filtrada)": len(g)}
-    row["Sem retorno"]            = count_set(g["_fase_norm"], {"sem retorno"})
-    row["Sem Interesse"]          = count_set(g["_fase_norm"], {"sem interesse"})
-    row["Fora do Perfil"]         = count_set(g["_fase_norm"], {"fora do perfil"})
-    row["Outros/Perdido"]         = count_set(g["_fase_norm"], {"outros / perdido","outros/perdido","outros perdido"})
-    row["Abaixo de R$500K"]       = count_set(g["_fase_norm"], {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"})
-    row["Agendando Reunião"]      = count_set(g["_fase_norm"], {"agendando reuniao","agendamento de reuniao"})
-    row["Reuniões Agendadas"]     = count_set(g["_fase_norm"], {"reuniao agendada","reunioes agendadas"})
-    row["Proposta e Negociação"]  = count_set(g["_fase_norm"], labels_proposta)      # inclui Follow up
-    row["Finalizando Venda"]      = count_set(g["_fase_norm"], labels_finalizando)   # NOVO
-    row["Negócio Fechado"]        = count_set(g["_fase_norm"], {"negocio fechado","negocios fechados"})
+    row["Sem retorno"] = count_set(g["_fase_norm"], {"sem retorno"})
+    row["Sem Interesse"] = count_set(g["_fase_norm"], {"sem interesse"})
+    row["Fora do Perfil"] = count_set(g["_fase_norm"], {"fora do perfil"})
+    row["Outros/Perdido"] = count_set(g["_fase_norm"], {"outros / perdido","outros/perdido","outros perdido"})
+    row["Abaixo de R$500K"] = count_set(g["_fase_norm"], {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"})
+    row["Agendando Reunião"] = count_set(g["_fase_norm"], labels_reuniao_agendando)
+    row["Reuniões Agendadas"] = count_set(g["_fase_norm"], labels_reuniao_agendada)
+    row["Proposta e Negociação"] = count_set(g["_fase_norm"], labels_proposta)
+    row["Finalizando Venda"] = count_set(g["_fase_norm"], labels_finalizando)  # NOVA
+    row["Negócio Fechado"] = count_set(g["_fase_norm"], labels_venda)
     anteriores = sum(row[k] for k in [
         "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
         "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Finalizando Venda","Negócio Fechado"
@@ -325,42 +322,38 @@ for resp in sorted(df["Responsável"].dropna().unique()):
                                  "Conversão Reunião (%)":pct(reun, leads),"Conversão Venda (%)":pct(vend, leads)})
 vend_origem_df = pd.DataFrame(vend_origem_rows)
 
-# ========================= Visão geral =========================
+# ========================= Visão geral (cards) =========================
 st.markdown("### 📊 Visão Geral (após filtros)")
 m1, m2, m3, m4, m5 = st.columns(5)
-total_leads = len(df)
-total_reunioes = int(count_set(df["_fase_norm"], labels_reuniao_all))
-total_em_proposta = int(count_set(df["_fase_norm"], labels_proposta))        # Proposta + Follow up Proposta
-total_finalizando = int(count_set(df["_fase_norm"], labels_finalizando))     # Nova etapa
-total_vendas = int(count_set(df["_fase_norm"], labels_venda))
-with m1: st.metric("Leads (Total)", total_leads)
-with m2: st.metric("Reuniões (Total)", total_reunioes)
-with m3: st.metric("Em Proposta (Total)", total_em_proposta)
-with m4: st.metric("Finalizando Venda (Total)", total_finalizando)
-with m5: st.metric("Vendas (Total)", total_vendas)
+with m1: st.metric("Leads (Total)", len(df))
+with m2: st.metric("Reuniões (Total)", int(count_set(df["_fase_norm"], labels_reuniao_all)))
+with m3: st.metric("Em Proposta", int(count_set(df["_fase_norm"], labels_proposta)))
+with m4: st.metric("Finalizando Venda", int(count_set(df["_fase_norm"], labels_finalizando)))
+with m5: st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
 
-# Paleta e ordem fixa das fases (com "Finalizando Venda")
+# Paleta e ordem fixa das fases (inclui Finalizando)
 phase_order = [
     "Em Atendimento",
     "Agendando Reunião",
     "Reuniões Agendadas",
     "Proposta e Negociação",
-    "Finalizando Venda",    # nova
+    "Finalizando Venda",        # NOVA
     "Negócio Fechado",
     "Abaixo de R$500K",
     "Fora do Perfil",
     "Sem Interesse",
     "Sem retorno",
-    "Outros/Perdido"
+    "Outros/Perdido",
 ]
+# amarelo -> verdes -> vermelhos (adicionamos 1 verde para "Finalizando Venda")
 phase_colors = [
     "#fbbf24",  # Em Atendimento (amarelo)
-    "#86efac",  # Agendando Reunião (verde claro)
-    "#4ade80",  # Reuniões Agendadas (verde)
-    "#22c55e",  # Proposta e Negociação (verde forte)
-    "#10b981",  # Finalizando Venda (verde esmeralda)
-    "#16a34a",  # Negócio Fechado (verde escuro)
-    "#fca5a5",  # Abaixo de R$500K
+    "#86efac",  # Agendando
+    "#4ade80",  # Reuniões agendadas
+    "#22c55e",  # Proposta
+    "#16a34a",  # Finalizando (verde mais escuro)
+    "#0ea5a8",  # Negócio Fechado (verde/teal)
+    "#fca5a5",  # Abaixo de 500k
     "#f87171",  # Fora do Perfil
     "#dc2626",  # Sem Interesse
     "#991b1b",  # Sem retorno
@@ -377,9 +370,11 @@ st.altair_chart(
     use_container_width=True
 )
 
-# Fases x Canal (normalizado, tooltip=Qtd)
-# Usar a ordem global phase_order para montar a lista de fases presentes no funil_df
-fases_cols = [c for c in phase_order if c in funil_df.columns and c not in ["Em Atendimento"]] + ["Em Atendimento"]
+# Fases x Canal (normalizado, tooltip=Qtd) — inclui Finalizando
+fases_cols = [
+    "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
+    "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Finalizando Venda","Negócio Fechado","Em Atendimento"
+]
 melt = funil_df[funil_df["Canal de Origem"]!="TOTAL"].melt(
     id_vars=["Canal de Origem"], value_vars=fases_cols, var_name="Fase", value_name="Qtd")
 melt["fase_ord"] = melt["Fase"].map(phase_rank).astype("int64")
@@ -395,7 +390,7 @@ st.altair_chart(
     use_container_width=True
 )
 
-# Conversões por canal
+# Conversões por canal (mantém)
 conv_melt = conv_df[conv_df["Canal de Origem"]!="TOTAL"].melt(
     id_vars=["Canal de Origem"], var_name="Métrica", value_name="Valor")
 st.markdown("### 📈 Conversões por Canal")
@@ -411,7 +406,6 @@ st.altair_chart(
 
 # Vendedoras (respeita filtros)
 st.markdown("### 👤 Vendedoras (respeita filtros de canal)")
-# mantém Leads/Reuniões/Vendas como antes
 base_v = prospec_resumo_df[prospec_resumo_df["Vendedora"]!="TOTAL"][["Vendedora","Leads Gerados","Reuniões Agendadas","Vendas"]]
 st.altair_chart(
     alt.Chart(base_v).transform_fold(
@@ -423,11 +417,11 @@ st.altair_chart(
     use_container_width=True
 )
 
-# Funil detalhado por vendedora (quantidade)
+# Funil detalhado por vendedora (quantidade) — inclui Finalizando
 st.markdown("### 📊 Funil detalhado por Vendedora")
 if not prospec_funil_df.empty:
     pf = prospec_funil_df[prospec_funil_df["Vendedora"]!="TOTAL"].copy()
-    fases_plot = phase_order  # já na ordem desejada (inclui Finalizando Venda)
+    fases_plot = phase_order  # já na ordem desejada
     for c in fases_plot:
         if c not in pf.columns: pf[c]=0
     melted_v = pf.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
@@ -443,7 +437,7 @@ if not prospec_funil_df.empty:
         use_container_width=True
     )
 
-# ========================= Leads criados por dia — com dias zerados =========================
+# ========================= Leads criados por dia — com dias zerados (v10) =========================
 st.markdown("### 📅 Leads criados por dia")
 detalhe = st.radio("Detalhar por", ["Total", "Vendedora", "Canal de Origem"], horizontal=True, key="detalhe_diario")
 show_mm = st.checkbox("Mostrar média móvel", value=True, key="mm_toggle")
@@ -454,12 +448,10 @@ if base_daily.empty:
     st.info("Nenhum lead com data de criação válida no intervalo/seleção atual.")
 else:
     base_daily["Dia"] = base_daily["Criado"].dt.floor("D")
-    # DataFrame com TODAS as datas do intervalo de filtros
     all_days = full_dates(d_ini, d_fim)
 
     if detalhe == "Total":
         g = base_daily.groupby("Dia").size().rename("Leads").reset_index()
-        # left-join com TODAS as datas e preencher zeros
         g = all_days.merge(g, on="Dia", how="left").fillna({"Leads": 0})
         g = g.sort_values("Dia")
         if show_mm:
@@ -486,19 +478,15 @@ else:
             chart = chart + line
 
     elif detalhe == "Vendedora":
-        # categorias (já filtradas pelos checkboxes)
         cats = sorted(base_daily["Responsável"].dropna().unique().tolist())
         if not cats:
             st.info("Nenhuma vendedora com dados no período/seleção atual.")
             st.stop()
-
-        # cartesian product: todas as datas x todas as vendedoras
         grid = all_days.assign(key=1)
         cats_df = pd.DataFrame({"Responsável": cats}).assign(key=1)
         cart = grid.merge(cats_df, on="key").drop(columns="key")
 
         g = base_daily.groupby(["Dia", "Responsável"]).size().rename("Leads").reset_index()
-        # preencher datas ausentes com zero
         g = cart.merge(g, on=["Dia", "Responsável"], how="left").fillna({"Leads": 0})
         g = g.sort_values(["Responsável", "Dia"])
 
@@ -536,7 +524,6 @@ else:
         if not cats:
             st.info("Nenhum canal com dados no período/seleção atual.")
             st.stop()
-
         grid = all_days.assign(key=1)
         cats_df = pd.DataFrame({"Canal de Origem": cats}).assign(key=1)
         cart = grid.merge(cats_df, on="key").drop(columns="key")
@@ -612,11 +599,10 @@ with PdfPages(pdf_bytes) as pdf:
     periodo_txt = f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}"
     resumo = (
         f"Período: {periodo_txt}\n"
-        f"Leads: {total_leads} | "
-        f"Reuniões: {total_reunioes} | "
-        f"Em Proposta: {total_em_proposta} | "
-        f"Finalizando Venda: {total_finalizando} | "
-        f"Vendas: {total_vendas}"
+        f"Leads: {len(df)} | Reuniões: {int(count_set(df['_fase_norm'], labels_reuniao_all))} | "
+        f"Em Proposta: {int(count_set(df['_fase_norm'], labels_proposta))} | "
+        f"Finalizando Venda: {int(count_set(df['_fase_norm'], labels_finalizando))} | "
+        f"Vendas: {int(count_set(df['_fase_norm'], labels_venda))}"
     )
     plt.text(0.05, 0.75, "Relatório CRM", fontsize=24, weight="bold")
     plt.text(0.05, 0.6, resumo, fontsize=14)
@@ -642,7 +628,9 @@ with PdfPages(pdf_bytes) as pdf:
 
     if not prospec_funil_df.empty:
         fig = plt.figure(figsize=(11,6))
-        pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"]!="TOTAL"].set_index("Vendedora")[phase_order]
+        # garantir colunas na ordem (inclui Finalizando)
+        cols_plot = [c for c in phase_order if c in prospec_funil_df.columns]
+        pf_plot = prospec_funil_df[prospec_funil_df["Vendedora"]!="TOTAL"].set_index("Vendedora")[cols_plot]
         pf_plot.plot(kind="bar", stacked=False, ax=plt.gca())
         plt.xticks(rotation=45, ha="right"); plt.title("Funil por Vendedora (base filtrada)"); plt.tight_layout()
         pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
