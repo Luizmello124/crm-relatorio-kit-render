@@ -229,7 +229,7 @@ for canal in canal_ordem:
     row = {"Canal de Origem": canal, "Leads Recebidos": total}
     for colname, variants in label_perdidos.items():
         row[colname] = count_set(g["_fase_norm"], variants)
-    row["Agendando Reunião"]     = count_set(g["_fase_norm"], labels_reunio_agendando)
+    row["Agendando Reunião"]     = count_set(g["_fase_norm"], labels_reuniao_agendando)
     row["Reuniões Agendadas"]    = count_set(g["_fase_norm"], labels_reunio_agendada)
     row["Proposta e Negociação"] = count_set(g["_fase_norm"], labels_proposta)     # já soma Follow up
     row["Finalizando Venda"]     = count_set(g["_fase_norm"], labels_finalizando)  # NOVO
@@ -256,12 +256,12 @@ funil_df = pd.concat([funil_df, pd.DataFrame([total_row])], ignore_index=True)
 conv_rows = []
 for canal in canal_ordem:
     g = df[df["Canal de Origem"] == canal]
-    leads = len(g); reun = count_set(g["_fase_norm"], labels_reunio_all); vend = count_set(g["_fase_norm"], labels_venda)
+    leads = len(g); reun = count_set(g["_fase_norm"], labels_reuniao_all); vend = count_set(g["_fase_norm"], labels_venda)
     conv_rows.append({"Canal de Origem": canal,
                       "% Reuniões/Leads": pct(reun, leads),
                       "% Vendas/Leads": pct(vend, leads),
                       "% Vendas/Reuniões": pct(vend, reun)})
-leads_tot = len(df); reun_tot = count_set(df["_fase_norm"], labels_reunio_all); vend_tot = count_set(df["_fase_norm"], labels_venda)
+leads_tot = len(df); reun_tot = count_set(df["_fase_norm"], labels_reuniao_all); vend_tot = count_set(df["_fase_norm"], labels_venda)
 conv_rows.append({"Canal de Origem":"TOTAL",
                   "% Reuniões/Leads": pct(reun_tot, leads_tot),
                   "% Vendas/Leads": pct(vend_tot, leads_tot),
@@ -275,13 +275,13 @@ prospec = base_vendedora_df
 prospec_rows = []
 for resp in todas_vendedoras:
     g = prospec[prospec["Responsável"] == resp]
-    leads = len(g); reun = count_set(g["_fase_norm"], labels_reunio_all); vend = count_set(g["_fase_norm"], labels_venda)
+    leads = len(g); reun = count_set(g["_fase_norm"], labels_reuniao_all); vend = count_set(g["_fase_norm"], labels_venda)
     prospec_rows.append({"Vendedora": resp, "Leads Gerados": leads, "Reuniões Agendadas": reun, "Vendas": vend,
                          "Conversão Reunião (%)": pct(reun, leads), "Conversão Venda (%)": pct(vend, leads)})
 prospec_rows.append({"Vendedora":"TOTAL","Leads Gerados":len(prospec),
-                     "Reuniões Agendadas":count_set(prospec["_fase_norm"], labels_reunio_all),
+                     "Reuniões Agendadas":count_set(prospec["_fase_norm"], labels_reuniao_all),
                      "Vendas":count_set(prospec["_fase_norm"], labels_venda),
-                     "Conversão Reunião (%)": pct(count_set(prospec["_fase_norm"], labels_reunio_all), len(prospec)) if len(prospec) else 0,
+                     "Conversão Reunião (%)": pct(count_set(prospec["_fase_norm"], labels_reuniao_all), len(prospec)) if len(prospec) else 0,
                      "Conversão Venda (%)": pct(count_set(prospec["_fase_norm"], labels_venda), len(prospec)) if len(prospec) else 0})
 prospec_resumo_df = pd.DataFrame(prospec_rows)
 
@@ -319,7 +319,7 @@ for resp in sorted(df["Responsável"].dropna().unique()):
         "Prospecção Ativa": g["Canal de Origem"].eq("Prospecção Ativa"),
         "Leads de Mkt": g["Canal de Origem"].isin(["Google Ads","Trafego Pago - Face","Trafego Pago - Insta","Impulsionamento Instagram","Inbound"]),
     }.items():
-        sub = g[m]; leads=len(sub); reun=count_set(sub["_fase_norm"], labels_reunio_all); vend=count_set(sub["_fase_norm"], labels_venda)
+        sub = g[m]; leads=len(sub); reun=count_set(sub["_fase_norm"], labels_reuniao_all); vend=count_set(sub["_fase_norm"], labels_venda)
         vend_origem_rows.append({"Vendedora":resp,"Origem do Lead":origem,"Leads Trabalhados":leads,
                                  "Reuniões Agendadas":reun,"Vendas":vend,
                                  "Conversão Reunião (%)":pct(reun, leads),"Conversão Venda (%)":pct(vend, leads)})
@@ -329,7 +329,7 @@ vend_origem_df = pd.DataFrame(vend_origem_rows)
 st.markdown("### 📊 Visão Geral (após filtros)")
 m1, m2, m3, m4, m5 = st.columns(5)
 total_leads = len(df)
-total_reunioes = int(count_set(df["_fase_norm"], labels_reunio_all))
+total_reunioes = int(count_set(df["_fase_norm"], labels_reuniao_all))
 total_em_proposta = int(count_set(df["_fase_norm"], labels_proposta))        # Proposta + Follow up Proposta
 total_finalizando = int(count_set(df["_fase_norm"], labels_finalizando))     # Nova etapa
 total_vendas = int(count_set(df["_fase_norm"], labels_venda))
