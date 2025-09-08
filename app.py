@@ -1,8 +1,8 @@
-# app.py — Relatório CRM — v10
-# Novidades v10:
-# - Gráfico "Leads criados por dia": barras lado-a-lado para Vendedora/Canal (x ordinal + xOffset)
-# - Filtros com checkboxes (Todos / Limpar / Inverter) para melhor UX
-# - Mantém: Base CLT/SEC, ordem/cores de fases, PDF/Excel, atalhos e MM opcional
+# app.py — Relatório CRM — v10 (com novas fases)
+# Ajustes solicitados:
+# - "Em Proposta" = ("Proposta e Negociação" + "Follow up Proposta")
+# - Nova etapa "Finalizando Venda" (verde) entre "Proposta e Negociação" e "Negócio Fechado"
+# - Big Numbers: Leads | Reuniões | Em Proposta | Finalizando Venda | Vendas
 
 import streamlit as st
 import pandas as pd
@@ -190,6 +190,7 @@ df = df[mask].copy()
 base_vendedora_df = df if not only_prospec else df[df["Canal de Origem"] == "Prospecção Ativa"]
 
 # ===== Labels / conjuntos de fases =====
+# Tudo em minúsculo/sem acento, pois norm_phase normaliza
 label_perdidos = {
     "Sem retorno": {"sem retorno"},
     "Sem Interesse": {"sem interesse"},
@@ -197,10 +198,27 @@ label_perdidos = {
     "Outros/Perdido": {"outros / perdido","outros/perdido","outros perdido"},
     "Abaixo de R$500K": {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"},
 }
+# Reuniões
 labels_reuniao_agendando = {"agendando reuniao","agendamento de reuniao"}
-labels_reuniao_agendada = {"reuniao agendada","reunioes agendadas"}
+labels_reuniao_agendada  = {"reuniao agendada","reunioes agendadas"}
 labels_reuniao_all = labels_reuniao_agendando | labels_reuniao_agendada
-labels_proposta = {"proposta e negociacao"}
+# Proposta (AJUSTE: incluir "Follow up Proposta")
+labels_proposta = {"proposta e negociacao", "follow up proposta"}
+# NOVA ETAPA: Finalizando Venda (todas essas fases contam aqui)
+labels_finalizando = {
+    "aprovacao da proposta",
+    "proposta aceita | gerar contrato",
+    "compliance",
+    "compliance | aguardando scd",
+    "compliance | cliente em ajuste",
+    "compliance aprovado",
+    "clicksign | assinatura",
+    "assinatura pendente",
+    "enviar boleto",
+    "aguardando pagamento",
+    "pagamento recebido",
+}
+# Vendas (fechados)
 labels_venda = {"negocio fechado","negocios fechados"}
 
 # ========================= Tabelas por canal =========================
@@ -211,16 +229,22 @@ for canal in canal_ordem:
     row = {"Canal de Origem": canal, "Leads Recebidos": total}
     for colname, variants in label_perdidos.items():
         row[colname] = count_set(g["_fase_norm"], variants)
-    row["Agendando Reunião"]   = count_set(g["_fase_norm"], labels_reuniao_agendando)
-    row["Reuniões Agendadas"]  = count_set(g["_fase_norm"], labels_reuniao_agendada)
-    row["Proposta e Negociação"]= count_set(g["_fase_norm"], labels_proposta)
-    row["Negócio Fechado"]     = count_set(g["_fase_norm"], labels_venda)
+    row["Agendando Reunião"]     = count_set(g["_fase_norm"], labels_reunio_agendando)
+    row["Reuniões Agendadas"]    = count_set(g["_fase_norm"], labels_reunio_agendada)
+    row["Proposta e Negociação"] = count_set(g["_fase_norm"], labels_proposta)     # já soma Follow up
+    row["Finalizando Venda"]     = count_set(g["_fase_norm"], labels_finalizando)  # NOVO
+    row["Negócio Fechado"]       = count_set(g["_fase_norm"], labels_venda)
     anteriores = sum(v for k, v in row.items() if k not in {"Canal de Origem","Leads Recebidos"})
-    row["Em Atendimento"]      = max(total - anteriores, 0)
+    row["Em Atendimento"]        = max(total - anteriores, 0)
     funil_rows.append(row)
 funil_df = pd.DataFrame(funil_rows)
-expected_cols = ["Canal de Origem","Leads Recebidos","Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
-                 "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"]
+expected_cols = [
+    "Canal de Origem","Leads Recebidos",
+    "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
+    "Agendando Reunião","Reuniões Agendadas",
+    "Proposta e Negociação","Finalizando Venda","Negócio Fechado",
+    "Em Atendimento"
+]
 for c in expected_cols:
     if c not in funil_df.columns: funil_df[c] = 0
 funil_df = funil_df[expected_cols]
@@ -232,12 +256,12 @@ funil_df = pd.concat([funil_df, pd.DataFrame([total_row])], ignore_index=True)
 conv_rows = []
 for canal in canal_ordem:
     g = df[df["Canal de Origem"] == canal]
-    leads = len(g); reun = count_set(g["_fase_norm"], labels_reuniao_all); vend = count_set(g["_fase_norm"], labels_venda)
+    leads = len(g); reun = count_set(g["_fase_norm"], labels_reunio_all); vend = count_set(g["_fase_norm"], labels_venda)
     conv_rows.append({"Canal de Origem": canal,
                       "% Reuniões/Leads": pct(reun, leads),
                       "% Vendas/Leads": pct(vend, leads),
                       "% Vendas/Reuniões": pct(vend, reun)})
-leads_tot = len(df); reun_tot = count_set(df["_fase_norm"], labels_reuniao_all); vend_tot = count_set(df["_fase_norm"], labels_venda)
+leads_tot = len(df); reun_tot = count_set(df["_fase_norm"], labels_reunio_all); vend_tot = count_set(df["_fase_norm"], labels_venda)
 conv_rows.append({"Canal de Origem":"TOTAL",
                   "% Reuniões/Leads": pct(reun_tot, leads_tot),
                   "% Vendas/Leads": pct(vend_tot, leads_tot),
@@ -251,13 +275,13 @@ prospec = base_vendedora_df
 prospec_rows = []
 for resp in todas_vendedoras:
     g = prospec[prospec["Responsável"] == resp]
-    leads = len(g); reun = count_set(g["_fase_norm"], labels_reuniao_all); vend = count_set(g["_fase_norm"], labels_venda)
+    leads = len(g); reun = count_set(g["_fase_norm"], labels_reunio_all); vend = count_set(g["_fase_norm"], labels_venda)
     prospec_rows.append({"Vendedora": resp, "Leads Gerados": leads, "Reuniões Agendadas": reun, "Vendas": vend,
                          "Conversão Reunião (%)": pct(reun, leads), "Conversão Venda (%)": pct(vend, leads)})
 prospec_rows.append({"Vendedora":"TOTAL","Leads Gerados":len(prospec),
-                     "Reuniões Agendadas":count_set(prospec["_fase_norm"], labels_reuniao_all),
+                     "Reuniões Agendadas":count_set(prospec["_fase_norm"], labels_reunio_all),
                      "Vendas":count_set(prospec["_fase_norm"], labels_venda),
-                     "Conversão Reunião (%)": pct(count_set(prospec["_fase_norm"], labels_reuniao_all), len(prospec)) if len(prospec) else 0,
+                     "Conversão Reunião (%)": pct(count_set(prospec["_fase_norm"], labels_reunio_all), len(prospec)) if len(prospec) else 0,
                      "Conversão Venda (%)": pct(count_set(prospec["_fase_norm"], labels_venda), len(prospec)) if len(prospec) else 0})
 prospec_resumo_df = pd.DataFrame(prospec_rows)
 
@@ -265,17 +289,20 @@ prospec_funil_rows = []
 for resp in todas_vendedoras:
     g = base_vendedora_df[base_vendedora_df["Responsável"] == resp]
     row = {"Vendedora": resp, "Leads Gerados (base filtrada)": len(g)}
-    row["Sem retorno"] = count_set(g["_fase_norm"], {"sem retorno"})
-    row["Sem Interesse"] = count_set(g["_fase_norm"], {"sem interesse"})
-    row["Fora do Perfil"] = count_set(g["_fase_norm"], {"fora do perfil"})
-    row["Outros/Perdido"] = count_set(g["_fase_norm"], {"outros / perdido","outros/perdido","outros perdido"})
-    row["Abaixo de R$500K"] = count_set(g["_fase_norm"], {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"})
-    row["Agendando Reunião"] = count_set(g["_fase_norm"], {"agendando reuniao","agendamento de reuniao"})
-    row["Reuniões Agendadas"] = count_set(g["_fase_norm"], {"reuniao agendada","reunioes agendadas"})
-    row["Proposta e Negociação"] = count_set(g["_fase_norm"], {"proposta e negociacao"})
-    row["Negócio Fechado"] = count_set(g["_fase_norm"], {"negocio fechado","negocios fechados"})
-    anteriores = sum(row[k] for k in ["Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
-                                      "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado"])
+    row["Sem retorno"]            = count_set(g["_fase_norm"], {"sem retorno"})
+    row["Sem Interesse"]          = count_set(g["_fase_norm"], {"sem interesse"})
+    row["Fora do Perfil"]         = count_set(g["_fase_norm"], {"fora do perfil"})
+    row["Outros/Perdido"]         = count_set(g["_fase_norm"], {"outros / perdido","outros/perdido","outros perdido"})
+    row["Abaixo de R$500K"]       = count_set(g["_fase_norm"], {"abaixo de 500k","abaixo de r$500k","abaixo de 500 k","abaixo de 500 mil"})
+    row["Agendando Reunião"]      = count_set(g["_fase_norm"], {"agendando reuniao","agendamento de reuniao"})
+    row["Reuniões Agendadas"]     = count_set(g["_fase_norm"], {"reuniao agendada","reunioes agendadas"})
+    row["Proposta e Negociação"]  = count_set(g["_fase_norm"], labels_proposta)      # inclui Follow up
+    row["Finalizando Venda"]      = count_set(g["_fase_norm"], labels_finalizando)   # NOVO
+    row["Negócio Fechado"]        = count_set(g["_fase_norm"], {"negocio fechado","negocios fechados"})
+    anteriores = sum(row[k] for k in [
+        "Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
+        "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Finalizando Venda","Negócio Fechado"
+    ])
     row["Em Atendimento"] = max(row["Leads Gerados (base filtrada)"] - anteriores, 0)
     prospec_funil_rows.append(row)
 prospec_funil_df = pd.DataFrame(prospec_funil_rows)
@@ -292,7 +319,7 @@ for resp in sorted(df["Responsável"].dropna().unique()):
         "Prospecção Ativa": g["Canal de Origem"].eq("Prospecção Ativa"),
         "Leads de Mkt": g["Canal de Origem"].isin(["Google Ads","Trafego Pago - Face","Trafego Pago - Insta","Impulsionamento Instagram","Inbound"]),
     }.items():
-        sub = g[m]; leads=len(sub); reun=count_set(sub["_fase_norm"], labels_reuniao_all); vend=count_set(sub["_fase_norm"], labels_venda)
+        sub = g[m]; leads=len(sub); reun=count_set(sub["_fase_norm"], labels_reunio_all); vend=count_set(sub["_fase_norm"], labels_venda)
         vend_origem_rows.append({"Vendedora":resp,"Origem do Lead":origem,"Leads Trabalhados":leads,
                                  "Reuniões Agendadas":reun,"Vendas":vend,
                                  "Conversão Reunião (%)":pct(reun, leads),"Conversão Venda (%)":pct(vend, leads)})
@@ -300,20 +327,45 @@ vend_origem_df = pd.DataFrame(vend_origem_rows)
 
 # ========================= Visão geral =========================
 st.markdown("### 📊 Visão Geral (após filtros)")
-m1, m2, m3, m4 = st.columns(4)
-with m1:
-    st.metric("Leads (Total)", len(df))
-with m2:
-    st.metric("Reuniões (Total)", int(count_set(df["_fase_norm"], labels_reuniao_all)))
-with m3:
-    st.metric("Em Proposta (Total)", int(count_set(df["_fase_norm"], labels_proposta)))
-with m4:
-    st.metric("Vendas (Total)", int(count_set(df["_fase_norm"], labels_venda)))
+m1, m2, m3, m4, m5 = st.columns(5)
+total_leads = len(df)
+total_reunioes = int(count_set(df["_fase_norm"], labels_reunio_all))
+total_em_proposta = int(count_set(df["_fase_norm"], labels_proposta))        # Proposta + Follow up Proposta
+total_finalizando = int(count_set(df["_fase_norm"], labels_finalizando))     # Nova etapa
+total_vendas = int(count_set(df["_fase_norm"], labels_venda))
+with m1: st.metric("Leads (Total)", total_leads)
+with m2: st.metric("Reuniões (Total)", total_reunioes)
+with m3: st.metric("Em Proposta (Total)", total_em_proposta)
+with m4: st.metric("Finalizando Venda (Total)", total_finalizando)
+with m5: st.metric("Vendas (Total)", total_vendas)
 
-# Paleta e ordem fixa das fases
-phase_order = ["Em Atendimento","Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado",
-               "Abaixo de R$500K","Fora do Perfil","Sem Interesse","Sem retorno","Outros/Perdido"]
-phase_colors = ["#fbbf24","#86efac","#4ade80","#22c55e","#16a34a","#fca5a5","#f87171","#dc2626","#991b1b","#ef4444"]
+# Paleta e ordem fixa das fases (com "Finalizando Venda")
+phase_order = [
+    "Em Atendimento",
+    "Agendando Reunião",
+    "Reuniões Agendadas",
+    "Proposta e Negociação",
+    "Finalizando Venda",    # nova
+    "Negócio Fechado",
+    "Abaixo de R$500K",
+    "Fora do Perfil",
+    "Sem Interesse",
+    "Sem retorno",
+    "Outros/Perdido"
+]
+phase_colors = [
+    "#fbbf24",  # Em Atendimento (amarelo)
+    "#86efac",  # Agendando Reunião (verde claro)
+    "#4ade80",  # Reuniões Agendadas (verde)
+    "#22c55e",  # Proposta e Negociação (verde forte)
+    "#10b981",  # Finalizando Venda (verde esmeralda)
+    "#16a34a",  # Negócio Fechado (verde escuro)
+    "#fca5a5",  # Abaixo de R$500K
+    "#f87171",  # Fora do Perfil
+    "#dc2626",  # Sem Interesse
+    "#991b1b",  # Sem retorno
+    "#ef4444",  # Outros/Perdido
+]
 phase_rank = {n:i for i,n in enumerate(phase_order)}
 
 # Leads por canal
@@ -326,8 +378,8 @@ st.altair_chart(
 )
 
 # Fases x Canal (normalizado, tooltip=Qtd)
-fases_cols = ["Sem retorno","Sem Interesse","Fora do Perfil","Outros/Perdido","Abaixo de R$500K",
-              "Agendando Reunião","Reuniões Agendadas","Proposta e Negociação","Negócio Fechado","Em Atendimento"]
+# Usar a ordem global phase_order para montar a lista de fases presentes no funil_df
+fases_cols = [c for c in phase_order if c in funil_df.columns and c not in ["Em Atendimento"]] + ["Em Atendimento"]
 melt = funil_df[funil_df["Canal de Origem"]!="TOTAL"].melt(
     id_vars=["Canal de Origem"], value_vars=fases_cols, var_name="Fase", value_name="Qtd")
 melt["fase_ord"] = melt["Fase"].map(phase_rank).astype("int64")
@@ -359,6 +411,7 @@ st.altair_chart(
 
 # Vendedoras (respeita filtros)
 st.markdown("### 👤 Vendedoras (respeita filtros de canal)")
+# mantém Leads/Reuniões/Vendas como antes
 base_v = prospec_resumo_df[prospec_resumo_df["Vendedora"]!="TOTAL"][["Vendedora","Leads Gerados","Reuniões Agendadas","Vendas"]]
 st.altair_chart(
     alt.Chart(base_v).transform_fold(
@@ -374,7 +427,7 @@ st.altair_chart(
 st.markdown("### 📊 Funil detalhado por Vendedora")
 if not prospec_funil_df.empty:
     pf = prospec_funil_df[prospec_funil_df["Vendedora"]!="TOTAL"].copy()
-    fases_plot = phase_order  # já na ordem desejada
+    fases_plot = phase_order  # já na ordem desejada (inclui Finalizando Venda)
     for c in fases_plot:
         if c not in pf.columns: pf[c]=0
     melted_v = pf.melt(id_vars=["Vendedora"], value_vars=fases_plot, var_name="Fase", value_name="Qtd")
@@ -558,12 +611,13 @@ with PdfPages(pdf_bytes) as pdf:
     fig = plt.figure(figsize=(10,6)); plt.axis("off")
     periodo_txt = f"{d_ini.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}"
     resumo = (
-    f"Período: {periodo_txt}\n"
-    f"Leads: {len(df)} | "
-    f"Reuniões: {int(count_set(df['_fase_norm'], labels_reuniao_all))} | "
-    f"Em Proposta: {int(count_set(df['_fase_norm'], labels_proposta))} | "
-    f"Vendas: {int(count_set(df['_fase_norm'], labels_venda))}"
-)
+        f"Período: {periodo_txt}\n"
+        f"Leads: {total_leads} | "
+        f"Reuniões: {total_reunioes} | "
+        f"Em Proposta: {total_em_proposta} | "
+        f"Finalizando Venda: {total_finalizando} | "
+        f"Vendas: {total_vendas}"
+    )
     plt.text(0.05, 0.75, "Relatório CRM", fontsize=24, weight="bold")
     plt.text(0.05, 0.6, resumo, fontsize=14)
     pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
